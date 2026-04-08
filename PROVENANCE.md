@@ -1,0 +1,63 @@
+# Provenance
+
+This project is human-directed and AI-assisted. Final design authority,
+acceptance criteria, and editorial control rest with the human author.
+AI contributions were material and are categorized below by function.
+
+## Human authorship
+
+The author defined the project direction, requirements, and design intent.
+AI systems contributed proposals, drafts, implementation, and critique under
+author supervision; they did not independently determine project goals or
+deployment decisions. The author reviewed, revised, or rejected AI-generated
+output throughout development.
+
+## AI-assisted collaboration
+
+### Architectural design and constraint model
+
+Lead collaboration: ChatGPT (OpenAI). Core architectural concepts including
+the observe/commit/rely verb split, three-layer storage design, provenance
+graph (memory_links), receipt-chain model, and the "no silent promotion"
+invariant were developed through iterative design sessions.
+
+### Adversarial review and provenance graph design
+
+DeepSeek contributed the key insight that event history and justification
+history are different things, leading to the first-class `memory_links` table
+and `PremiseRef` model. Also identified the dependency tracking gap between
+memories that use other memories as premises.
+
+### Implementation, tests, and integration
+
+Lead collaboration: Claude (Anthropic) via Claude Code. Heavy contributions
+to source code, test suites, module integration, and build configuration,
+including assembly of architectural decisions into working code.
+
+## Provenance basis and limits
+
+This document is a functional attribution record based on commit history,
+co-author trailers (where present), project notes, and documented working
+sessions. It is not a complete forensic account of all contributions.
+
+Some AI contributions (especially design critique, rejected alternatives,
+and footguns avoided) may not appear in repository artifacts or commit
+metadata.
+
+Model names/tools are recorded at the platform level (e.g., ChatGPT,
+Claude Code, DeepSeek); exact model versions may vary across sessions and
+are not exhaustively reconstructed here.
+
+## What this document does not claim
+
+- No exact proportional attribution. Contributions are categorized by
+  function, not quantified by token count or lines of code.
+- Design and implementation were not cleanly sequential. Architecture
+  informed code, code revealed design gaps, and the feedback loop was
+  continuous.
+- "Footguns avoided" and "ideas that didn't ship" are real contributions
+  that leave no artifact. This document cannot fully account for them.
+
+---
+
+This document reflects the project state as of 2026-04-08 and may be revised.
