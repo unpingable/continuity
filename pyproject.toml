@@ -16,6 +16,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
+[project.scripts]
+contctl = "continuity.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
