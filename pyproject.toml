@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-timeout>=2.0"]
 
 [project.scripts]
 contctl = "continuity.cli:main"
