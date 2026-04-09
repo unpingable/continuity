@@ -500,22 +500,29 @@ class ContinuityMCPServer:
 def _send_response(response: dict[str, Any]) -> None:
     """Send a JSON-RPC response with Content-Length header."""
     body = json.dumps(response)
-    header = f"Content-Length: {len(body)}\r\n\r\n"
-    sys.stdout.write(header)
-    sys.stdout.write(body)
-    sys.stdout.flush()
+    header = f"Content-Length: {len(body.encode('utf-8'))}\r\n\r\n"
+    sys.stdout.buffer.write(header.encode("utf-8"))
+    sys.stdout.buffer.write(body.encode("utf-8"))
+    sys.stdout.buffer.flush()
 
 
 def _read_request() -> dict[str, Any] | None:
-    """Read a JSON-RPC request with Content-Length header."""
-    headers: dict[str, str] = {}
+    """Read a JSON-RPC request with Content-Length header.
+
+    Uses binary reads to avoid readline() consuming bytes from the
+    next message's headers.
+    """
+    buf = b""
     while True:
-        line = sys.stdin.readline()
-        if not line:
+        byte = sys.stdin.buffer.read(1)
+        if not byte:
             return None
-        line = line.strip()
-        if not line:
+        buf += byte
+        if buf.endswith(b"\r\n\r\n"):
             break
+
+    headers: dict[str, str] = {}
+    for line in buf.decode("utf-8").strip().split("\r\n"):
         match = re.match(r"([^:]+):\s*(.+)", line)
         if match:
             headers[match.group(1)] = match.group(2)
@@ -524,10 +531,10 @@ def _read_request() -> dict[str, Any] | None:
     if content_length is None:
         return None
 
-    body = sys.stdin.read(int(content_length))
+    body = sys.stdin.buffer.read(int(content_length))
     if not body:
         return None
-    return json.loads(body)
+    return json.loads(body.decode("utf-8"))
 
 
 def create_server(db_path: Path | None = None) -> ContinuityMCPServer:
