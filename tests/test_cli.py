@@ -68,6 +68,23 @@ def test_observe_quiet(db_path: str) -> None:
     assert "\n" not in output.strip()
 
 
+def test_where_human(db_path: str) -> None:
+    run(db_path, ["init"])
+    output = run(db_path, ["where"])
+    assert "db_path:" in output
+    assert "source:       explicit" in output
+    assert "store_id:" in output
+
+
+def test_where_json(db_path: str) -> None:
+    run(db_path, ["init"])
+    info = run_json(db_path, ["where", "--json"])
+    assert info["db_path"] == db_path
+    assert info["source"] == "explicit"
+    assert info["exists"] is True
+    assert info["metadata"]["store_id"].startswith("store_")
+
+
 def test_case_command_human(db_path: str) -> None:
     """contctl case <scope> renders a human-readable bundle."""
     run(db_path, ["init"])

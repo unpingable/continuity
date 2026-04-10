@@ -43,7 +43,9 @@ from continuity.api.models import (
     StandingRef,
 )
 from continuity.util.clock import isoformat_now, to_isoformat
+from continuity.util.dbpath import find_git_root
 from continuity.util.hashing import receipt_hash
+from continuity.util.ids import new_id
 from continuity.util.jsoncanon import canonical_json, from_json
 
 
@@ -116,6 +118,57 @@ class SQLiteStore:
         schema_sql = schema_path.read_text(encoding="utf-8")
         with self._connect() as conn:
             conn.executescript(schema_sql)
+            self._ensure_store_metadata(conn)
+
+    def _ensure_store_metadata(self, conn: sqlite3.Connection) -> None:
+        """Populate store_metadata on first init.
+
+        The metadata is a singleton — one row per database — that records
+        store identity, the git root the DB lived next to at creation
+        time, and a project hint derived from the surrounding directory
+        names. It is never updated after creation; it describes origin,
+        not current state.
+        """
+        row = conn.execute(
+            "SELECT store_id FROM store_metadata WHERE id = 1"
+        ).fetchone()
+        if row is not None:
+            return
+
+        db_dir = self.db_path.parent.resolve()
+        git_root = find_git_root(db_dir)
+        if git_root is not None:
+            project_hint = git_root.name
+        else:
+            project_hint = db_dir.name
+
+        conn.execute(
+            "INSERT INTO store_metadata "
+            "(id, store_id, project_hint, git_root, created_at) "
+            "VALUES (1, ?, ?, ?, ?)",
+            (
+                new_id("store"),
+                project_hint,
+                str(git_root) if git_root is not None else None,
+                isoformat_now(),
+            ),
+        )
+
+    def get_store_metadata(self) -> dict[str, Any] | None:
+        """Return the singleton store metadata row, or None if not set."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT store_id, project_hint, git_root, created_at "
+                "FROM store_metadata WHERE id = 1"
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "store_id": row["store_id"],
+                "project_hint": row["project_hint"],
+                "git_root": row["git_root"],
+                "created_at": row["created_at"],
+            }
 
     def migrate_schema(self) -> dict[str, Any]:
         """Update CHECK constraints on existing tables to match current schema.

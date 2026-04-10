@@ -49,10 +49,7 @@ from continuity.store.sqlite import (
     MemoryNotFoundError,
     SQLiteStore,
 )
-
-
-DEFAULT_DB_DIR = Path.home() / ".local" / "share" / "continuity"
-DEFAULT_DB_PATH = DEFAULT_DB_DIR / "continuity.db"
+from continuity.util.dbpath import GLOBAL_DB_PATH, resolve_db_path
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +326,9 @@ TOOLS: list[dict[str, Any]] = [
 
 class ContinuityMCPServer:
     def __init__(self, db_path: Path | None = None) -> None:
-        self.db_path = db_path or DEFAULT_DB_PATH
+        if db_path is None:
+            db_path, _source = resolve_db_path()
+        self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._store: SQLiteStore | None = None
 
@@ -667,11 +666,17 @@ def main() -> None:
     )
     parser.add_argument(
         "--db", default=None,
-        help=f"path to SQLite database (default: {DEFAULT_DB_PATH})",
+        help=(
+            "path to SQLite database. "
+            "Resolution order: --db, $CONTINUITY_DB_PATH, "
+            f"<git-root>/.continuity/db.sqlite, {GLOBAL_DB_PATH}"
+        ),
     )
     args = parser.parse_args()
 
-    db_path = Path(args.db) if args.db else None
+    explicit = Path(args.db) if args.db else None
+    db_path, source = resolve_db_path(explicit)
+    log.info("DB resolved: %s (source=%s)", db_path, source)
     run_mcp_server(db_path)
 
 

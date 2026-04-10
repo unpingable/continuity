@@ -39,14 +39,16 @@ from continuity.store.sqlite import (
     MemoryNotFoundError,
     SQLiteStore,
 )
+from continuity.util.dbpath import GLOBAL_DB_PATH, resolve_db_path
 
 
-DEFAULT_DB_DIR = Path.home() / ".local" / "share" / "continuity"
-DEFAULT_DB_PATH = DEFAULT_DB_DIR / "continuity.db"
+def _resolve(args: argparse.Namespace) -> tuple[Path, str]:
+    explicit = Path(args.db) if args.db else None
+    return resolve_db_path(explicit)
 
 
 def _get_store(args: argparse.Namespace) -> SQLiteStore:
-    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
+    db_path, _source = _resolve(args)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     store = SQLiteStore(db_path)
     store.initialize()
@@ -105,9 +107,41 @@ def _parse_premise(raw: str) -> PremiseRef:
 # ---------------------------------------------------------------------------
 
 def cmd_init(args: argparse.Namespace) -> None:
-    store = _get_store(args)
-    db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
-    print(f"initialized: {db_path}")
+    db_path, source = _resolve(args)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = SQLiteStore(db_path)
+    store.initialize()
+    print(f"initialized: {db_path} (source={source})")
+
+
+def cmd_where(args: argparse.Namespace) -> None:
+    """Show the active database path, how it was resolved, and its identity."""
+    db_path, source = _resolve(args)
+    info: dict[str, Any] = {
+        "db_path": str(db_path),
+        "source": source,
+        "exists": db_path.exists(),
+    }
+    if db_path.exists():
+        # Initialize is idempotent and will create the store_metadata table
+        # for DBs created before that table existed (soft migration).
+        store = SQLiteStore(db_path)
+        store.initialize()
+        info["metadata"] = store.get_store_metadata()
+
+    if args.json:
+        _out(info)
+        return
+
+    print(f"db_path:      {info['db_path']}")
+    print(f"source:       {info['source']}")
+    print(f"exists:       {info['exists']}")
+    if info.get("metadata"):
+        m = info["metadata"]
+        print(f"store_id:     {m.get('store_id')}")
+        print(f"project_hint: {m.get('project_hint')}")
+        print(f"git_root:     {m.get('git_root') or '(none)'}")
+        print(f"created_at:   {m.get('created_at')}")
 
 
 def cmd_migrate(args: argparse.Namespace) -> None:
@@ -357,13 +391,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--db", default=None,
-        help=f"path to SQLite database (default: {DEFAULT_DB_PATH})",
+        help=(
+            "path to SQLite database. "
+            "Resolution order: --db, $CONTINUITY_DB_PATH, "
+            "<git-root>/.continuity/db.sqlite, "
+            f"{GLOBAL_DB_PATH}"
+        ),
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
     # init
     sub.add_parser("init", help="initialize the database")
+
+    # where
+    p_where = sub.add_parser(
+        "where",
+        help="show the active DB path, how it was resolved, and its identity",
+    )
+    p_where.add_argument("--json", action="store_true", help="output as JSON")
 
     # migrate
     sub.add_parser(
@@ -454,6 +500,7 @@ def build_parser() -> argparse.ArgumentParser:
 COMMANDS = {
     "init": cmd_init,
     "migrate": cmd_migrate,
+    "where": cmd_where,
     "observe": cmd_observe,
     "commit": cmd_commit,
     "revoke": cmd_revoke,
