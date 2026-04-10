@@ -62,6 +62,15 @@ Core verb split:
 - **commit**: durable, receipted, scoped (status=committed, reliance_class set)
 - **rely**: downstream computation checks explain/rely_ok before depending on memory
 
+## Debugging Discipline
+
+Shared doctrine across the constellation (annotated source: `agent_gov/CLAUDE.md`):
+
+- **Default to reduction.** Escalate to integration only after reduction has failed to discriminate.
+- **Belief must be earned by the cheapest available falsification, not constructed by accretion.**
+
+**In this project**, "load-bearing" means the moment a memory transitions from `observed` to `committed`, or the moment downstream computation calls `rely_ok` on it. The cheapest discriminating test is usually: re-check the source. Does the underlying fact still hold when queried fresh, or are we relying on a stale snapshot of a snapshot?
+
 ## Don't
 
 - Don't build automatic invalidation cascades — rely_ok computes taint from premise status
