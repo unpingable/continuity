@@ -17,10 +17,21 @@ Tools:
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import sys
 from pathlib import Path
 from typing import Any
+
+_LOG_PATH = Path.home() / ".local" / "share" / "continuity" / "mcp-debug.log"
+_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    filename=str(_LOG_PATH),
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger("continuity.mcp")
 
 from continuity.api.models import (
     ActorRef,
@@ -498,43 +509,34 @@ class ContinuityMCPServer:
 # ---------------------------------------------------------------------------
 
 def _send_response(response: dict[str, Any]) -> None:
-    """Send a JSON-RPC response with Content-Length header."""
-    body = json.dumps(response)
-    header = f"Content-Length: {len(body.encode('utf-8'))}\r\n\r\n"
-    sys.stdout.buffer.write(header.encode("utf-8"))
+    """Send a JSON-RPC response as NDJSON (one JSON object per line).
+
+    Claude Code expects newline-delimited JSON, not Content-Length framing.
+    """
+    body = json.dumps(response, separators=(",", ":"))
+    log.debug("SEND id=%s method=%s len=%d", response.get("id"), response.get("method"), len(body))
     sys.stdout.buffer.write(body.encode("utf-8"))
+    sys.stdout.buffer.write(b"\n")
     sys.stdout.buffer.flush()
 
 
 def _read_request() -> dict[str, Any] | None:
-    """Read a JSON-RPC request with Content-Length header.
+    """Read a JSON-RPC request as NDJSON (one JSON object per line).
 
-    Uses binary reads to avoid readline() consuming bytes from the
-    next message's headers.
+    Claude Code sends newline-delimited JSON, not Content-Length framing.
     """
-    buf = b""
-    while True:
-        byte = sys.stdin.buffer.read(1)
-        if not byte:
-            return None
-        buf += byte
-        if buf.endswith(b"\r\n\r\n"):
-            break
-
-    headers: dict[str, str] = {}
-    for line in buf.decode("utf-8").strip().split("\r\n"):
-        match = re.match(r"([^:]+):\s*(.+)", line)
-        if match:
-            headers[match.group(1)] = match.group(2)
-
-    content_length = headers.get("Content-Length")
-    if content_length is None:
+    log.debug("RECV waiting for line...")
+    line = sys.stdin.buffer.readline()
+    if not line:
+        log.debug("RECV stdin EOF")
         return None
-
-    body = sys.stdin.buffer.read(int(content_length))
-    if not body:
-        return None
-    return json.loads(body.decode("utf-8"))
+    line = line.strip()
+    if not line:
+        log.debug("RECV empty line, skipping")
+        return _read_request()
+    parsed = json.loads(line.decode("utf-8"))
+    log.debug("RECV id=%s method=%s", parsed.get("id"), parsed.get("method"))
+    return parsed
 
 
 def create_server(db_path: Path | None = None) -> ContinuityMCPServer:
@@ -543,11 +545,16 @@ def create_server(db_path: Path | None = None) -> ContinuityMCPServer:
 
 def run_mcp_server(db_path: Path | None = None) -> None:
     """Run the continuity MCP server over JSON-RPC/stdio."""
+    log.info("SERVER STARTING db_path=%s pid=%d", db_path, os.getpid())
+    log.info("  python=%s", sys.executable)
+    log.info("  argv=%s", sys.argv)
     server = create_server(db_path)
+    log.info("SERVER READY, entering read loop")
 
     while True:
         request = _read_request()
         if request is None:
+            log.info("SERVER EXITING (null request)")
             break
 
         method = request.get("method", "")
@@ -555,11 +562,19 @@ def run_mcp_server(db_path: Path | None = None) -> None:
         request_id = request.get("id")
 
         if method == "initialize":
+            log.info("INIT params: %s", json.dumps(params, default=str))
+            client_version = params.get("protocolVersion", "unknown")
+            log.info("INIT client requests protocolVersion=%s", client_version)
+            # Negotiate: echo back the client's version if we can work with it,
+            # otherwise offer our preferred version and hope for the best.
+            SUPPORTED_VERSIONS = ["2025-03-26", "2024-11-05"]
+            negotiated = client_version if client_version in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[0]
+            log.info("INIT negotiated protocolVersion=%s", negotiated)
             _send_response({
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": negotiated,
                     "capabilities": {"tools": {}},
                     "serverInfo": {
                         "name": "continuity",

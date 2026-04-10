@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "mcp-ping": {
+      "command": "/home/jbeck/git/continuity/.venv/bin/python3",
+      "args": ["/home/jbeck/git/continuity/mcp_ping_server.py"]
+    },
+    "continuity": {
+      "command": "/home/jbeck/git/continuity/.venv/bin/python3",
+      "args": ["-m", "continuity.mcp"]
+    }
+  }
+}
