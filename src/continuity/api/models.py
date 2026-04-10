@@ -448,3 +448,47 @@ class ExplainMemoryResponse(JsonModel):
     dependents: list[MemoryLink] = Field(default_factory=list)
     rely_ok: bool
     rely_reason: str
+
+
+# ---------------------------------------------------------------------------
+# Case bundle (derived view)
+# ---------------------------------------------------------------------------
+
+class GetCaseRequest(JsonModel):
+    """Request for the derived case bundle for a scope."""
+    scope: str = Field(..., min_length=1, max_length=255)
+    include_expired: bool = False
+
+
+class CaseItem(JsonModel):
+    """A single memory inside a case bundle, paired with its rely state."""
+    memory: MemoryObject
+    rely_ok: bool
+    rely_reason: str
+
+
+class CaseBundle(JsonModel):
+    """Derived view of all memories in a case scope.
+
+    A case is identified by its scope. The bundle is computed on demand
+    from existing memories — nothing is persisted at the case level. Items
+    in each bucket are ordered chronologically by created_at, so reading
+    top to bottom roughly follows the investigation timeline.
+
+    The bundle is a navigation aid; it is not itself authoritative. Each
+    embedded item carries its own rely_ok flag, and code that wants to act
+    on a finding should rely on the underlying fact, not the bundle.
+    """
+    scope: str
+    title: str | None = None
+    summary: CaseItem | None = None
+
+    facts: list[CaseItem] = Field(default_factory=list)
+    hypotheses: list[CaseItem] = Field(default_factory=list)
+    decisions: list[CaseItem] = Field(default_factory=list)
+    constraints: list[CaseItem] = Field(default_factory=list)
+    notes: list[CaseItem] = Field(default_factory=list)
+    other: list[CaseItem] = Field(default_factory=list)
+
+    total_memories: int = 0
+    last_touch: datetime | None = None

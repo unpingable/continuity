@@ -16,10 +16,13 @@ from typing import Any, Iterator
 from continuity.api.models import (
     ActorRef,
     Basis,
+    CaseBundle,
+    CaseItem,
     CommitMemoryRequest,
     CommitMemoryResponse,
     EventType,
     ExplainMemoryResponse,
+    GetCaseRequest,
     LinkStatus,
     MemoryEvent,
     MemoryKind,
@@ -46,6 +49,20 @@ from continuity.util.jsoncanon import canonical_json, from_json
 
 def _to_json(value: Any) -> str:
     return canonical_json(value)
+
+
+def _summary_priority(item: "CaseItem") -> tuple[int, Any]:
+    """Sort key for picking the bundle's summary memory.
+
+    Prefer committed summaries, then by most recent updated_at. Returning
+    a tuple lets us compare across two candidates without writing branches.
+    """
+    status_rank = {
+        MemoryStatus.COMMITTED: 2,
+        MemoryStatus.OBSERVED: 1,
+        MemoryStatus.REVOKED: 0,
+    }.get(item.memory.status, 0)
+    return (status_rank, item.memory.updated_at)
 
 
 class MemoryNotFoundError(KeyError):
@@ -155,6 +172,67 @@ class SQLiteStore:
             items=[self._row_to_memory_object(r) for r in rows],
             total=total,
         )
+
+    def get_case(self, req: GetCaseRequest) -> CaseBundle:
+        """Return a derived case bundle for a scope.
+
+        Cases are not persisted; they are computed on demand by bucketing
+        all memories in the scope by kind and pairing each with its rely
+        state. Revoked items are included so the case preserves the
+        ruled-out branches that were part of the investigation.
+        """
+        with self._connect() as conn:
+            params: list[Any] = [req.scope]
+            sql = "SELECT * FROM memory_objects WHERE scope = ?"
+            if not req.include_expired:
+                sql += " AND (expires_at IS NULL OR expires_at > ?)"
+                params.append(isoformat_now())
+            sql += " ORDER BY created_at ASC, memory_id ASC"
+
+            rows = conn.execute(sql, params).fetchall()
+            memories = [self._row_to_memory_object(r) for r in rows]
+
+            items: list[CaseItem] = []
+            for m in memories:
+                rely_ok, rely_reason = self._compute_rely_state(conn, m)
+                items.append(CaseItem(
+                    memory=m, rely_ok=rely_ok, rely_reason=rely_reason,
+                ))
+
+        bundle = CaseBundle(scope=req.scope, total_memories=len(items))
+
+        for item in items:
+            kind = item.memory.kind
+            if kind == MemoryKind.SUMMARY:
+                # Pick the most recently updated committed summary as the
+                # bundle summary; fall back to the most recent of any status.
+                if (
+                    bundle.summary is None
+                    or _summary_priority(item) > _summary_priority(bundle.summary)
+                ):
+                    bundle.summary = item
+            elif kind == MemoryKind.FACT:
+                bundle.facts.append(item)
+            elif kind == MemoryKind.HYPOTHESIS:
+                bundle.hypotheses.append(item)
+            elif kind == MemoryKind.DECISION:
+                bundle.decisions.append(item)
+            elif kind == MemoryKind.CONSTRAINT:
+                bundle.constraints.append(item)
+            elif kind == MemoryKind.NOTE:
+                bundle.notes.append(item)
+            else:
+                bundle.other.append(item)
+
+        if bundle.summary is not None:
+            title = bundle.summary.memory.content.get("title")
+            if isinstance(title, str):
+                bundle.title = title
+
+        if items:
+            bundle.last_touch = max(m.memory.updated_at for m in items)
+
+        return bundle
 
     def explain_memory(self, memory_id: str) -> ExplainMemoryResponse:
         with self._connect() as conn:

@@ -36,6 +36,7 @@ log = logging.getLogger("continuity.mcp")
 from continuity.api.models import (
     ActorRef,
     CommitMemoryRequest,
+    GetCaseRequest,
     ObserveMemoryRequest,
     PremiseRef,
     QueryMemoryRequest,
@@ -290,6 +291,33 @@ TOOLS: list[dict[str, Any]] = [
             "required": [],
         },
     },
+    {
+        "name": "memory_get_case",
+        "description": (
+            "Get a derived case bundle for a scope. A case is computed on "
+            "demand from all memories in the scope, bucketed by kind "
+            "(facts, hypotheses, decisions, constraints, notes, other) "
+            "and paired with rely state. Use this to retrieve an "
+            "investigation, debugging session, or other multi-memory case "
+            "as a single structured view. The bundle itself is a navigation "
+            "aid — code that wants to act on a finding should rely on the "
+            "underlying fact, not the bundle."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "description": "Scope identifying the case (e.g., 'case:mcp-stdio-2026-04-09').",
+                },
+                "include_expired": {
+                    "type": "boolean",
+                    "description": "Include expired memories. Default false.",
+                },
+            },
+            "required": ["scope"],
+        },
+    },
 ]
 
 
@@ -475,6 +503,14 @@ class ContinuityMCPServer:
                 for d in resp.dependents
             ],
         }
+
+    def _handle_memory_get_case(self, args: dict[str, Any]) -> dict[str, Any]:
+        req = GetCaseRequest(
+            scope=args["scope"],
+            include_expired=args.get("include_expired", False),
+        )
+        bundle = self.store.get_case(req)
+        return bundle.model_dump(mode="json")
 
     def _handle_memory_stats(self, args: dict[str, Any]) -> dict[str, Any]:
         with self.store._connect() as conn:
