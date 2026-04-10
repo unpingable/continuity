@@ -266,6 +266,7 @@ def cmd_observe(args: argparse.Namespace) -> None:
         source_refs=source_refs,
         premises=premises,
         confidence=args.confidence,
+        supersedes=args.supersedes,
         actor=actor,
         idempotency_key=args.idempotency_key,
     )
@@ -387,6 +388,26 @@ def cmd_explain(args: argparse.Namespace) -> None:
     _out(resp)
 
 
+def cmd_latest(args: argparse.Namespace) -> None:
+    """Find the most recently updated memory in (scope, kind)."""
+    store = _get_store(args)
+    status = None if args.status == "any" else args.status
+    memory = store.latest_memory(
+        scope=args.scope,
+        kind=args.kind,
+        status=status,
+    )
+    if memory is None:
+        if args.quiet:
+            sys.exit(1)
+        print("(no match)", file=sys.stderr)
+        sys.exit(1)
+    if args.quiet:
+        print(memory.memory_id)
+    else:
+        _out(memory)
+
+
 def cmd_case(args: argparse.Namespace) -> None:
     store = _get_store(args)
     bundle = store.get_case(GetCaseRequest(
@@ -436,6 +457,8 @@ def cmd_case(args: argparse.Namespace) -> None:
             print(f"  {rely_marker} [{status}] {item.memory.memory_id[:16]}  {primary_str}")
         print()
 
+    _render_bucket("project_states", bundle.project_states)
+    _render_bucket("next_actions", bundle.next_actions)
     _render_bucket("facts", bundle.facts)
     _render_bucket("hypotheses", bundle.hypotheses)
     _render_bucket("experiments", bundle.experiments)
@@ -562,6 +585,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_obs.add_argument("--confidence", type=float, default=0.5)
     p_obs.add_argument("--source-ref", action="append", help="kind:ref[:note]")
     p_obs.add_argument("--premise", action="append", help="memory_id[:relation[:strength]]")
+    p_obs.add_argument(
+        "--supersedes", default=None,
+        help="memory_id this observation will replace when committed",
+    )
     p_obs.add_argument("--actor", help="principal_id for the actor")
     p_obs.add_argument("--idempotency-key", default=None)
     p_obs.add_argument("--receipt", action="store_true", help="output full receipt")
@@ -612,6 +639,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_exp = sub.add_parser("explain", help="explain a memory (lineage, premises, rely_ok)")
     p_exp.add_argument("memory_id")
 
+    # latest
+    p_latest = sub.add_parser(
+        "latest",
+        help="find the most recently updated memory in (scope, kind)",
+    )
+    p_latest.add_argument("--scope", required=True)
+    p_latest.add_argument(
+        "--kind", required=True, choices=[k.value for k in MemoryKind],
+    )
+    p_latest.add_argument(
+        "--status", default="committed",
+        choices=["observed", "committed", "revoked", "any"],
+        help="status filter (default: committed; pass 'any' to skip filter)",
+    )
+    p_latest.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="output only the memory_id; exit nonzero if no match",
+    )
+
     # case
     p_case = sub.add_parser(
         "case",
@@ -658,6 +704,7 @@ COMMANDS = {
     "get": cmd_get,
     "query": cmd_query,
     "explain": cmd_explain,
+    "latest": cmd_latest,
     "case": cmd_case,
     "stats": cmd_stats,
 }

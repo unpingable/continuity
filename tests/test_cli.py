@@ -68,6 +68,51 @@ def test_observe_quiet(db_path: str) -> None:
     assert "\n" not in output.strip()
 
 
+def test_latest_command(db_path: str) -> None:
+    run(db_path, ["init"])
+
+    # No matches yet
+    import io
+    err_buf = io.StringIO()
+    with patch("sys.stderr", err_buf):
+        with pytest.raises(SystemExit):
+            run(db_path, ["latest", "--scope", "drift", "--kind", "project_state"])
+
+    # Observe + commit one
+    mid = run_json(db_path, [
+        "observe",
+        "--scope", "drift",
+        "--kind", "project_state",
+        "--basis", "direct_capture",
+        "--content", '{"phase": "v1"}',
+    ])["memory_id"]
+    run(db_path, ["commit", mid, "--reliance-class", "retrieve_only"])
+
+    # Now latest finds it
+    found = run_json(db_path, [
+        "latest", "--scope", "drift", "--kind", "project_state",
+    ])
+    assert found["memory_id"] == mid
+    assert found["content"]["phase"] == "v1"
+
+    # Observe a second one with --supersedes
+    mid2 = run(db_path, [
+        "observe", "-q",
+        "--scope", "drift",
+        "--kind", "project_state",
+        "--basis", "direct_capture",
+        "--content", '{"phase": "v2"}',
+        "--supersedes", mid,
+    ]).strip()
+    run(db_path, ["commit", mid2, "--reliance-class", "retrieve_only"])
+
+    found2 = run_json(db_path, [
+        "latest", "--scope", "drift", "--kind", "project_state",
+    ])
+    assert found2["memory_id"] == mid2
+    assert found2["supersedes"] == mid
+
+
 def test_where_human(db_path: str) -> None:
     run(db_path, ["init"])
     output = run(db_path, ["where"])

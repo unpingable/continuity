@@ -361,6 +361,7 @@ class ObserveMemoryRequest(JsonModel):
     premises: list[PremiseRef] = Field(default_factory=list)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     expires_at: datetime | None = None
+    supersedes: str | None = Field(default=None, max_length=80)
     actor: ActorRef | None = None
     standing: StandingRef | None = None
     idempotency_key: str | None = Field(default=None, max_length=255)
@@ -496,6 +497,8 @@ class CaseBundle(JsonModel):
     decisions: list[CaseItem] = Field(default_factory=list)
     constraints: list[CaseItem] = Field(default_factory=list)
     notes: list[CaseItem] = Field(default_factory=list)
+    project_states: list[CaseItem] = Field(default_factory=list)
+    next_actions: list[CaseItem] = Field(default_factory=list)
     other: list[CaseItem] = Field(default_factory=list)
 
     total_memories: int = 0

@@ -56,13 +56,16 @@ def test_case_buckets_by_kind(store: SQLiteStore) -> None:
     _observe(store, scope, MemoryKind.DECISION, {"text": "d1"})
     _observe(store, scope, MemoryKind.CONSTRAINT, {"text": "constraint"})
     _observe(store, scope, MemoryKind.NOTE, {"text": "note"})
+    _observe(store, scope, MemoryKind.PROJECT_STATE, {
+        "project": "p", "status": "active", "last_touch_summary": "x",
+    })
     _observe(store, scope, MemoryKind.NEXT_ACTION, {
         "project": "p", "action": "do thing",
     })
 
     bundle = store.get_case(GetCaseRequest(scope=scope))
 
-    assert bundle.total_memories == 9
+    assert bundle.total_memories == 10
     assert len(bundle.facts) == 2
     assert len(bundle.hypotheses) == 1
     assert len(bundle.experiments) == 1
@@ -70,7 +73,9 @@ def test_case_buckets_by_kind(store: SQLiteStore) -> None:
     assert len(bundle.decisions) == 1
     assert len(bundle.constraints) == 1
     assert len(bundle.notes) == 1
-    assert len(bundle.other) == 1
+    assert len(bundle.project_states) == 1
+    assert len(bundle.next_actions) == 1
+    assert len(bundle.other) == 0
     assert bundle.summary is None
 
 

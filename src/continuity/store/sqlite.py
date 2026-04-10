@@ -301,6 +301,42 @@ class SQLiteStore:
         with self._connect() as conn:
             return self._get_memory(conn, memory_id)
 
+    def latest_memory(
+        self,
+        scope: str,
+        kind: MemoryKind | str,
+        *,
+        status: MemoryStatus | str | None = MemoryStatus.COMMITTED,
+    ) -> MemoryObject | None:
+        """Return the most recently updated memory in (scope, kind), if any.
+
+        Default filters to committed only — the typical "what is the
+        current blessed value of this kind in this scope" query. Pass
+        status=None to consider any status. Returns None if no match.
+
+        This is the read side of the supersede convention: when you want
+        to write a new project_state, you call latest_memory first to get
+        the prior, then observe the new one with supersedes=prior.id, then
+        commit. Both old and new remain committed; lineage is preserved
+        through the supersedes pointer; the latest_memory call surfaces
+        the chain head.
+        """
+        sql = (
+            "SELECT * FROM memory_objects "
+            "WHERE scope = ? AND kind = ? "
+        )
+        params: list[Any] = [scope, str(kind)]
+        if status is not None:
+            sql += "AND status = ? "
+            params.append(str(status))
+        sql += "ORDER BY updated_at DESC, created_at DESC LIMIT 1"
+
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+            if row is None:
+                return None
+            return self._row_to_memory_object(row)
+
     def query_memory(self, req: QueryMemoryRequest) -> QueryMemoryResponse:
         where: list[str] = []
         params: list[Any] = []
@@ -402,6 +438,10 @@ class SQLiteStore:
                 bundle.constraints.append(item)
             elif kind == MemoryKind.NOTE:
                 bundle.notes.append(item)
+            elif kind == MemoryKind.PROJECT_STATE:
+                bundle.project_states.append(item)
+            elif kind == MemoryKind.NEXT_ACTION:
+                bundle.next_actions.append(item)
             else:
                 bundle.other.append(item)
 
@@ -482,6 +522,7 @@ class SQLiteStore:
                 content=req.content,
                 source_refs=req.source_refs,
                 expires_at=req.expires_at,
+                supersedes=req.supersedes,
                 created_by=req.actor,
             )
 
@@ -951,6 +992,7 @@ class SQLiteStore:
             "content": memory.content,
             "source_refs": [s.model_dump(mode="json") for s in memory.source_refs],
             "expires_at": to_isoformat(memory.expires_at),
+            "supersedes": memory.supersedes,
             "actor": memory.created_by.model_dump(mode="json") if memory.created_by else None,
             "standing": req.standing.model_dump(mode="json") if req.standing else None,
             "premises": [p.model_dump(mode="json") for p in req.premises],

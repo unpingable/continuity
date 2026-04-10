@@ -37,6 +37,8 @@ from continuity.api.models import (
     ActorRef,
     CommitMemoryRequest,
     GetCaseRequest,
+    MemoryKind,
+    MemoryStatus,
     ObserveMemoryRequest,
     PremiseRef,
     QueryMemoryRequest,
@@ -125,6 +127,15 @@ TOOLS: list[dict[str, Any]] = [
                         },
                     },
                     "description": "Premise links to other memories this depends on.",
+                },
+                "supersedes": {
+                    "type": "string",
+                    "description": (
+                        "Memory ID this new observation will replace when "
+                        "committed. Use with memory_query_latest to implement "
+                        "the query-then-supersede pattern for project_state "
+                        "and other singleton-current kinds."
+                    ),
                 },
             },
             "required": ["scope", "kind", "basis", "content"],
@@ -295,6 +306,43 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "memory_query_latest",
+        "description": (
+            "Return the most recently updated memory in (scope, kind), "
+            "or null. Defaults to filtering by status=committed — the "
+            "typical 'what is the current blessed value of this kind in "
+            "this scope' query. This is the read side of the supersede "
+            "convention: call this before observing a new project_state "
+            "or next_action, then pass its memory_id as 'supersedes' on "
+            "the new observation. Both old and new remain committed; "
+            "lineage is preserved through the supersedes pointer."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "description": "Scope to search within.",
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "fact", "note", "decision", "hypothesis",
+                        "summary", "constraint", "project_state", "next_action",
+                        "experiment", "lesson",
+                    ],
+                    "description": "Memory kind to filter by.",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["observed", "committed", "revoked", "any"],
+                    "description": "Status filter. Default 'committed'.",
+                },
+            },
+            "required": ["scope", "kind"],
+        },
+    },
+    {
         "name": "memory_get_case",
         "description": (
             "Get a derived case bundle for a scope. A case is computed on "
@@ -327,6 +375,22 @@ TOOLS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 # Tool handlers
 # ---------------------------------------------------------------------------
+
+_DEFAULT_PRINCIPAL_ID = "claude:mcp"
+_PRINCIPAL_ENV_VAR = "CONTINUITY_PRINCIPAL_ID"
+
+
+def _mcp_actor() -> ActorRef:
+    """Build the actor that authored the current MCP call.
+
+    Defaults to 'claude:mcp' but can be overridden via the
+    CONTINUITY_PRINCIPAL_ID environment variable. Use this when you want
+    the audit trail to read 'jbeck via claude:mcp' instead of 'claude:mcp'
+    alone — set it in .mcp.json env or in your shell rc.
+    """
+    principal_id = os.environ.get(_PRINCIPAL_ENV_VAR, _DEFAULT_PRINCIPAL_ID)
+    return ActorRef(principal_id=principal_id, auth_method="mcp")
+
 
 class ContinuityMCPServer:
     def __init__(
@@ -394,13 +458,15 @@ class ContinuityMCPServer:
             confidence=args.get("confidence", 0.5),
             source_refs=source_refs,
             premises=premises,
-            actor=ActorRef(principal_id="claude:mcp", auth_method="mcp"),
+            supersedes=args.get("supersedes"),
+            actor=_mcp_actor(),
         )
 
         resp = self.store.observe_memory(req)
         return {
             "memory_id": resp.memory.memory_id,
             "status": resp.memory.status,
+            "supersedes": resp.memory.supersedes,
             "receipt_id": resp.receipt.receipt_id,
             "receipt_hash": resp.receipt.hash,
         }
@@ -422,7 +488,7 @@ class ContinuityMCPServer:
             note=args.get("note"),
             supersedes=args.get("supersedes"),
             premises=premises,
-            approved_by=ActorRef(principal_id="claude:mcp", auth_method="mcp"),
+            approved_by=_mcp_actor(),
         )
 
         resp = self.store.commit_memory(req)
@@ -439,7 +505,7 @@ class ContinuityMCPServer:
             memory_id=args["memory_id"],
             reason=args["reason"],
             replacement_memory_id=args.get("replacement_memory_id"),
-            revoked_by=ActorRef(principal_id="claude:mcp", auth_method="mcp"),
+            revoked_by=_mcp_actor(),
         )
 
         resp = self.store.revoke_memory(req)
@@ -520,6 +586,30 @@ class ContinuityMCPServer:
                 }
                 for d in resp.dependents
             ],
+        }
+
+    def _handle_memory_query_latest(self, args: dict[str, Any]) -> dict[str, Any]:
+        status_arg = args.get("status", "committed")
+        status = None if status_arg == "any" else status_arg
+        memory = self.store.latest_memory(
+            scope=args["scope"],
+            kind=args["kind"],
+            status=status,
+        )
+        if memory is None:
+            return {"memory": None}
+        return {
+            "memory": {
+                "memory_id": memory.memory_id,
+                "scope": memory.scope,
+                "kind": memory.kind,
+                "status": memory.status,
+                "reliance_class": memory.reliance_class,
+                "supersedes": memory.supersedes,
+                "content": memory.content,
+                "created_at": str(memory.created_at),
+                "updated_at": str(memory.updated_at),
+            },
         }
 
     def _handle_memory_get_case(self, args: dict[str, Any]) -> dict[str, Any]:
