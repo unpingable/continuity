@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS store_metadata (
     store_id      TEXT NOT NULL UNIQUE,
     project_hint  TEXT NULL,
     git_root      TEXT NULL,
+    scope_kind    TEXT NULL,  -- 'project' | 'workspace' | 'global' | 'explicit'
     created_at    TEXT NOT NULL
 );
 

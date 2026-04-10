@@ -113,21 +113,58 @@ class SQLiteStore:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
 
-    def initialize(self) -> None:
+    def initialize(
+        self,
+        *,
+        scope_kind: str | None = None,
+        scope_label: str | None = None,
+    ) -> None:
+        """Initialize the database and (optionally) stamp scope identity.
+
+        scope_kind and scope_label are only used on first-init: they
+        describe what kind of store this is ('project', 'workspace',
+        'global', 'explicit') and a human label. Subsequent calls
+        do not overwrite existing metadata.
+        """
         schema_path = Path(__file__).with_name("schema.sql")
         schema_sql = schema_path.read_text(encoding="utf-8")
         with self._connect() as conn:
             conn.executescript(schema_sql)
-            self._ensure_store_metadata(conn)
+            self._add_missing_columns(conn)
+            self._ensure_store_metadata(
+                conn,
+                scope_kind=scope_kind,
+                scope_label=scope_label,
+            )
 
-    def _ensure_store_metadata(self, conn: sqlite3.Connection) -> None:
+    def _add_missing_columns(self, conn: sqlite3.Connection) -> None:
+        """ALTER TABLE for columns added after the original schema was shipped.
+
+        SQLite ALTER TABLE ADD COLUMN is cheap and fully supported. We
+        check existence via PRAGMA table_info first to stay idempotent.
+        """
+        existing = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(store_metadata)").fetchall()
+        }
+        if "scope_kind" not in existing:
+            conn.execute("ALTER TABLE store_metadata ADD COLUMN scope_kind TEXT NULL")
+
+    def _ensure_store_metadata(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        scope_kind: str | None = None,
+        scope_label: str | None = None,
+    ) -> None:
         """Populate store_metadata on first init.
 
         The metadata is a singleton — one row per database — that records
         store identity, the git root the DB lived next to at creation
-        time, and a project hint derived from the surrounding directory
-        names. It is never updated after creation; it describes origin,
-        not current state.
+        time, the scope kind, and a project hint. It is never updated
+        after creation; it describes origin, not current state.
+
+        scope_label, when provided, overrides the auto-derived hint.
         """
         row = conn.execute(
             "SELECT store_id FROM store_metadata WHERE id = 1"
@@ -137,19 +174,23 @@ class SQLiteStore:
 
         db_dir = self.db_path.parent.resolve()
         git_root = find_git_root(db_dir)
-        if git_root is not None:
+
+        if scope_label is not None:
+            project_hint = scope_label
+        elif git_root is not None:
             project_hint = git_root.name
         else:
             project_hint = db_dir.name
 
         conn.execute(
             "INSERT INTO store_metadata "
-            "(id, store_id, project_hint, git_root, created_at) "
-            "VALUES (1, ?, ?, ?, ?)",
+            "(id, store_id, project_hint, git_root, scope_kind, created_at) "
+            "VALUES (1, ?, ?, ?, ?, ?)",
             (
                 new_id("store"),
                 project_hint,
                 str(git_root) if git_root is not None else None,
+                scope_kind,
                 isoformat_now(),
             ),
         )
@@ -158,7 +199,7 @@ class SQLiteStore:
         """Return the singleton store metadata row, or None if not set."""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT store_id, project_hint, git_root, created_at "
+                "SELECT store_id, project_hint, git_root, scope_kind, created_at "
                 "FROM store_metadata WHERE id = 1"
             ).fetchone()
             if row is None:
@@ -167,6 +208,7 @@ class SQLiteStore:
                 "store_id": row["store_id"],
                 "project_hint": row["project_hint"],
                 "git_root": row["git_root"],
+                "scope_kind": row["scope_kind"],
                 "created_at": row["created_at"],
             }
 

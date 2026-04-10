@@ -49,7 +49,11 @@ from continuity.store.sqlite import (
     MemoryNotFoundError,
     SQLiteStore,
 )
-from continuity.util.dbpath import GLOBAL_DB_PATH, resolve_db_path
+from continuity.util.dbpath import (
+    GLOBAL_DB_PATH,
+    resolve_db_path,
+    source_to_scope_kind,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -325,10 +329,20 @@ TOOLS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 class ContinuityMCPServer:
-    def __init__(self, db_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        *,
+        scope_kind: str | None = None,
+        scope_label: str | None = None,
+    ) -> None:
         if db_path is None:
-            db_path, _source = resolve_db_path()
+            db_path, source = resolve_db_path()
+            if scope_kind is None:
+                scope_kind = source_to_scope_kind(source)
         self.db_path = db_path
+        self.scope_kind = scope_kind
+        self.scope_label = scope_label
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._store: SQLiteStore | None = None
 
@@ -336,7 +350,10 @@ class ContinuityMCPServer:
     def store(self) -> SQLiteStore:
         if self._store is None:
             self._store = SQLiteStore(self.db_path)
-            self._store.initialize()
+            self._store.initialize(
+                scope_kind=self.scope_kind,
+                scope_label=self.scope_label,
+            )
         return self._store
 
     def list_tools(self) -> list[dict[str, Any]]:
@@ -576,16 +593,31 @@ def _read_request() -> dict[str, Any] | None:
     return parsed
 
 
-def create_server(db_path: Path | None = None) -> ContinuityMCPServer:
-    return ContinuityMCPServer(db_path)
+def create_server(
+    db_path: Path | None = None,
+    *,
+    scope_kind: str | None = None,
+    scope_label: str | None = None,
+) -> ContinuityMCPServer:
+    return ContinuityMCPServer(
+        db_path, scope_kind=scope_kind, scope_label=scope_label,
+    )
 
 
-def run_mcp_server(db_path: Path | None = None) -> None:
+def run_mcp_server(
+    db_path: Path | None = None,
+    *,
+    scope_kind: str | None = None,
+    scope_label: str | None = None,
+) -> None:
     """Run the continuity MCP server over JSON-RPC/stdio."""
     log.info("SERVER STARTING db_path=%s pid=%d", db_path, os.getpid())
     log.info("  python=%s", sys.executable)
     log.info("  argv=%s", sys.argv)
-    server = create_server(db_path)
+    log.info("  scope_kind=%s scope_label=%s", scope_kind, scope_label)
+    server = create_server(
+        db_path, scope_kind=scope_kind, scope_label=scope_label,
+    )
     log.info("SERVER READY, entering read loop")
 
     while True:
@@ -669,15 +701,32 @@ def main() -> None:
         help=(
             "path to SQLite database. "
             "Resolution order: --db, $CONTINUITY_DB_PATH, "
+            "--workspace/$CONTINUITY_WORKSPACE, "
             f"<git-root>/.continuity/db.sqlite, {GLOBAL_DB_PATH}"
+        ),
+    )
+    parser.add_argument(
+        "--workspace", default=None, metavar="ID",
+        help=(
+            "select a named workspace store. "
+            "Equivalent to setting $CONTINUITY_WORKSPACE."
         ),
     )
     args = parser.parse_args()
 
     explicit = Path(args.db) if args.db else None
-    db_path, source = resolve_db_path(explicit)
-    log.info("DB resolved: %s (source=%s)", db_path, source)
-    run_mcp_server(db_path)
+    db_path, source = resolve_db_path(explicit, workspace=args.workspace)
+    scope_kind = source_to_scope_kind(source)
+    scope_label = (
+        (args.workspace or os.environ.get("CONTINUITY_WORKSPACE"))
+        if source == "workspace"
+        else None
+    )
+    log.info(
+        "DB resolved: %s (source=%s, scope_kind=%s, label=%s)",
+        db_path, source, scope_kind, scope_label,
+    )
+    run_mcp_server(db_path, scope_kind=scope_kind, scope_label=scope_label)
 
 
 if __name__ == "__main__":

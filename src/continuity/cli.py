@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,19 +40,43 @@ from continuity.store.sqlite import (
     MemoryNotFoundError,
     SQLiteStore,
 )
-from continuity.util.dbpath import GLOBAL_DB_PATH, resolve_db_path
+from continuity.util.dbpath import (
+    GLOBAL_DB_PATH,
+    resolve_db_path,
+    source_to_scope_kind,
+)
+from continuity.workspace import (
+    WorkspaceExistsError,
+    WorkspaceNotFoundError,
+    add_project_to_workspace,
+    create_workspace,
+    list_workspace_summaries,
+    remove_project_from_workspace,
+    workspace_info,
+)
 
 
 def _resolve(args: argparse.Namespace) -> tuple[Path, str]:
     explicit = Path(args.db) if args.db else None
-    return resolve_db_path(explicit)
+    workspace = getattr(args, "workspace", None)
+    return resolve_db_path(explicit, workspace=workspace)
+
+
+def _scope_label(args: argparse.Namespace, source: str) -> str | None:
+    """Pick a human label for store metadata based on resolution source."""
+    if source == "workspace":
+        return getattr(args, "workspace", None) or os.environ.get("CONTINUITY_WORKSPACE")
+    return None
 
 
 def _get_store(args: argparse.Namespace) -> SQLiteStore:
-    db_path, _source = _resolve(args)
+    db_path, source = _resolve(args)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     store = SQLiteStore(db_path)
-    store.initialize()
+    store.initialize(
+        scope_kind=source_to_scope_kind(source),
+        scope_label=_scope_label(args, source),
+    )
     return store
 
 
@@ -110,7 +135,10 @@ def cmd_init(args: argparse.Namespace) -> None:
     db_path, source = _resolve(args)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     store = SQLiteStore(db_path)
-    store.initialize()
+    store.initialize(
+        scope_kind=source_to_scope_kind(source),
+        scope_label=_scope_label(args, source),
+    )
     print(f"initialized: {db_path} (source={source})")
 
 
@@ -121,10 +149,11 @@ def cmd_where(args: argparse.Namespace) -> None:
         "db_path": str(db_path),
         "source": source,
         "exists": db_path.exists(),
+        "scope_kind_resolved": source_to_scope_kind(source),
     }
     if db_path.exists():
         # Initialize is idempotent and will create the store_metadata table
-        # for DBs created before that table existed (soft migration).
+        # (and add scope_kind column) for DBs created before they existed.
         store = SQLiteStore(db_path)
         store.initialize()
         info["metadata"] = store.get_store_metadata()
@@ -135,13 +164,81 @@ def cmd_where(args: argparse.Namespace) -> None:
 
     print(f"db_path:      {info['db_path']}")
     print(f"source:       {info['source']}")
+    print(f"scope_kind:   {info['scope_kind_resolved']}")
     print(f"exists:       {info['exists']}")
     if info.get("metadata"):
         m = info["metadata"]
         print(f"store_id:     {m.get('store_id')}")
         print(f"project_hint: {m.get('project_hint')}")
+        print(f"stored_kind:  {m.get('scope_kind') or '(none)'}")
         print(f"git_root:     {m.get('git_root') or '(none)'}")
         print(f"created_at:   {m.get('created_at')}")
+
+
+# ---------------------------------------------------------------------------
+# Workspace commands
+# ---------------------------------------------------------------------------
+
+def cmd_workspace_create(args: argparse.Namespace) -> None:
+    try:
+        manifest = create_workspace(
+            args.workspace_id,
+            label=args.label,
+        )
+    except WorkspaceExistsError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"created workspace: {manifest['id']}")
+    print(f"  manifest: {Path('~/.config/continuity/workspaces') / args.workspace_id / 'manifest.json'}")
+    print(f"  db:       {Path('~/.config/continuity/workspaces') / args.workspace_id / 'db.sqlite'}")
+    print()
+    print("To use it:")
+    print(f"  export CONTINUITY_WORKSPACE={manifest['id']}")
+    print(f"  contctl --workspace {manifest['id']} init")
+
+
+def cmd_workspace_list(args: argparse.Namespace) -> None:
+    summaries = list_workspace_summaries()
+    if args.json:
+        _out(summaries)
+        return
+    if not summaries:
+        print("(no workspaces)")
+        return
+    for s in summaries:
+        marker = "*" if s["db_exists"] else " "
+        print(f"{marker} {s['id']:30s}  {s['label']}  ({s['project_count']} project(s))")
+
+
+def cmd_workspace_show(args: argparse.Namespace) -> None:
+    try:
+        info = workspace_info(args.workspace_id)
+    except WorkspaceNotFoundError as exc:
+        print(f"error: workspace not found: {exc}", file=sys.stderr)
+        sys.exit(1)
+    _out(info)
+
+
+def cmd_workspace_add_project(args: argparse.Namespace) -> None:
+    try:
+        manifest = add_project_to_workspace(
+            args.workspace_id, str(Path(args.project_path).expanduser().resolve()),
+        )
+    except WorkspaceNotFoundError as exc:
+        print(f"error: workspace not found: {exc}", file=sys.stderr)
+        sys.exit(1)
+    _out(manifest)
+
+
+def cmd_workspace_remove_project(args: argparse.Namespace) -> None:
+    try:
+        manifest = remove_project_from_workspace(
+            args.workspace_id, str(Path(args.project_path).expanduser().resolve()),
+        )
+    except WorkspaceNotFoundError as exc:
+        print(f"error: workspace not found: {exc}", file=sys.stderr)
+        sys.exit(1)
+    _out(manifest)
 
 
 def cmd_migrate(args: argparse.Namespace) -> None:
@@ -394,8 +491,18 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "path to SQLite database. "
             "Resolution order: --db, $CONTINUITY_DB_PATH, "
+            "--workspace/$CONTINUITY_WORKSPACE, "
             "<git-root>/.continuity/db.sqlite, "
             f"{GLOBAL_DB_PATH}"
+        ),
+    )
+    parser.add_argument(
+        "--workspace", default=None, metavar="ID",
+        help=(
+            "select a named workspace store at "
+            "~/.config/continuity/workspaces/<ID>/db.sqlite. "
+            "Wins over git-root resolution. Equivalent to setting "
+            "$CONTINUITY_WORKSPACE."
         ),
     )
 
@@ -410,6 +517,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="show the active DB path, how it was resolved, and its identity",
     )
     p_where.add_argument("--json", action="store_true", help="output as JSON")
+
+    # workspace
+    p_ws = sub.add_parser(
+        "workspace",
+        help="manage cross-project workspace stores",
+    )
+    ws_sub = p_ws.add_subparsers(dest="workspace_command", required=True)
+
+    p_ws_create = ws_sub.add_parser("create", help="create a new workspace")
+    p_ws_create.add_argument("workspace_id", help="workspace identifier (no slashes)")
+    p_ws_create.add_argument("--label", default=None, help="human label")
+
+    p_ws_list = ws_sub.add_parser("list", help="list known workspaces")
+    p_ws_list.add_argument("--json", action="store_true")
+
+    p_ws_show = ws_sub.add_parser("show", help="show a workspace manifest and paths")
+    p_ws_show.add_argument("workspace_id")
+
+    p_ws_add = ws_sub.add_parser(
+        "add-project", help="add a project path to a workspace manifest",
+    )
+    p_ws_add.add_argument("workspace_id")
+    p_ws_add.add_argument("project_path")
+
+    p_ws_rm = ws_sub.add_parser(
+        "remove-project", help="remove a project path from a workspace manifest",
+    )
+    p_ws_rm.add_argument("workspace_id")
+    p_ws_rm.add_argument("project_path")
 
     # migrate
     sub.add_parser(
@@ -497,10 +633,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+WORKSPACE_COMMANDS = {
+    "create": cmd_workspace_create,
+    "list": cmd_workspace_list,
+    "show": cmd_workspace_show,
+    "add-project": cmd_workspace_add_project,
+    "remove-project": cmd_workspace_remove_project,
+}
+
+
+def cmd_workspace(args: argparse.Namespace) -> None:
+    handler = WORKSPACE_COMMANDS[args.workspace_command]
+    handler(args)
+
+
 COMMANDS = {
     "init": cmd_init,
     "migrate": cmd_migrate,
     "where": cmd_where,
+    "workspace": cmd_workspace,
     "observe": cmd_observe,
     "commit": cmd_commit,
     "revoke": cmd_revoke,
