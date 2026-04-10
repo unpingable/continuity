@@ -68,6 +68,70 @@ def test_observe_quiet(db_path: str) -> None:
     assert "\n" not in output.strip()
 
 
+def test_case_command_human(db_path: str) -> None:
+    """contctl case <scope> renders a human-readable bundle."""
+    run(db_path, ["init"])
+
+    # Build a small case
+    summary_id = run_json(db_path, [
+        "observe",
+        "--scope", "case:demo",
+        "--kind", "summary",
+        "--basis", "direct_capture",
+        "--content", '{"title": "Demo Case", "status": "open"}',
+    ])["memory_id"]
+    run(db_path, ["commit", summary_id, "--reliance-class", "advisory"])
+
+    fact_id = run_json(db_path, [
+        "observe",
+        "--scope", "case:demo",
+        "--kind", "fact",
+        "--basis", "direct_capture",
+        "--content", '{"text": "demo finding"}',
+    ])["memory_id"]
+    run(db_path, ["commit", fact_id, "--reliance-class", "actionable"])
+
+    run(db_path, [
+        "observe",
+        "--scope", "case:demo",
+        "--kind", "experiment",
+        "--basis", "direct_capture",
+        "--content", '{"action": "ran the test"}',
+    ])
+
+    output = run(db_path, ["case", "case:demo"])
+
+    assert "Demo Case" in output
+    assert "summary" in output
+    assert "facts" in output
+    assert "experiments" in output
+    assert "demo finding" in output
+    assert "ran the test" in output
+
+
+def test_case_command_json(db_path: str) -> None:
+    run(db_path, ["init"])
+    run(db_path, [
+        "observe",
+        "--scope", "case:json-out",
+        "--kind", "lesson",
+        "--basis", "inference",
+        "--content", '{"text": "always check framing"}',
+    ])
+
+    bundle = run_json(db_path, ["case", "case:json-out", "--json"])
+    assert bundle["scope"] == "case:json-out"
+    assert bundle["total_memories"] == 1
+    assert len(bundle["lessons"]) == 1
+
+
+def test_case_command_empty_scope(db_path: str) -> None:
+    run(db_path, ["init"])
+    output = run(db_path, ["case", "case:nothing-here"])
+    assert "case:nothing-here" in output
+    assert "total memories: 0" in output
+
+
 def test_observe_with_receipt(db_path: str) -> None:
     run(db_path, ["init"])
     result = run_json(db_path, [

@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS memory_objects (
             'summary',
             'constraint',
             'project_state',
-            'next_action'
+            'next_action',
+            'experiment',
+            'lesson'
         )
     ),
     basis           TEXT NOT NULL CHECK (
@@ -154,7 +156,10 @@ CREATE TABLE IF NOT EXISTS memory_links (
             'implements',
             'supersedes',
             'invalidates',
-            'about'
+            'about',
+            'evidence_for',
+            'confirmed_by',
+            'ruled_out_by'
         )
     ),
 

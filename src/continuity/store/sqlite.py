@@ -51,6 +51,36 @@ def _to_json(value: Any) -> str:
     return canonical_json(value)
 
 
+def _extract_create_table(schema_sql: str, table: str) -> str | None:
+    """Extract a single CREATE TABLE statement from a multi-statement schema.
+
+    Returns the statement without trailing semicolon, suitable for substituting
+    into sqlite_master.sql via PRAGMA writable_schema. Returns None if not found.
+    """
+    marker = f"CREATE TABLE IF NOT EXISTS {table} ("
+    start = schema_sql.find(marker)
+    if start == -1:
+        return None
+    # Walk forward tracking parenthesis depth until we hit the closing ');'
+    depth = 0
+    i = start
+    while i < len(schema_sql):
+        ch = schema_sql[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                # Found the closing paren of the CREATE TABLE
+                end = i + 1
+                stmt = schema_sql[start:end]
+                # Strip "IF NOT EXISTS" — sqlite_master stores the canonical form
+                stmt = stmt.replace("CREATE TABLE IF NOT EXISTS ", "CREATE TABLE ")
+                return stmt
+        i += 1
+    return None
+
+
 def _summary_priority(item: "CaseItem") -> tuple[int, Any]:
     """Sort key for picking the bundle's summary memory.
 
@@ -86,6 +116,58 @@ class SQLiteStore:
         schema_sql = schema_path.read_text(encoding="utf-8")
         with self._connect() as conn:
             conn.executescript(schema_sql)
+
+    def migrate_schema(self) -> dict[str, Any]:
+        """Update CHECK constraints on existing tables to match current schema.
+
+        SQLite's CREATE TABLE IF NOT EXISTS does not update CHECK constraints
+        on tables that already exist. When new enum values are added (new
+        memory kinds, link relations, etc.), existing databases need their
+        sqlite_master entries patched in place. This is the documented
+        SQLite pattern for altering constraints without rebuilding tables.
+
+        Returns a dict describing what was changed.
+        """
+        schema_path = Path(__file__).with_name("schema.sql")
+        schema_sql = schema_path.read_text(encoding="utf-8")
+
+        # Parse out the CREATE TABLE statements we want to patch.
+        # We only patch tables whose CHECK constraints we extend over time.
+        targets = ("memory_objects", "memory_links")
+        new_defs: dict[str, str] = {}
+        for table in targets:
+            stmt = _extract_create_table(schema_sql, table)
+            if stmt is None:
+                raise RuntimeError(
+                    f"could not find CREATE TABLE {table} in schema.sql"
+                )
+            new_defs[table] = stmt
+
+        changed: list[str] = []
+        with self._connect() as conn:
+            for table, new_sql in new_defs.items():
+                row = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE name = ? AND type = 'table'",
+                    (table,),
+                ).fetchone()
+                if row is None:
+                    continue
+                old_sql = row["sql"]
+                if old_sql.strip() == new_sql.strip():
+                    continue
+                # Use writable_schema to patch the constraint definition.
+                conn.execute("PRAGMA writable_schema = ON")
+                conn.execute(
+                    "UPDATE sqlite_master SET sql = ? WHERE name = ? AND type = 'table'",
+                    (new_sql, table),
+                )
+                conn.execute("PRAGMA writable_schema = OFF")
+                changed.append(table)
+
+            # Verify integrity after patching.
+            integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+
+        return {"changed_tables": changed, "integrity_check": integrity}
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -215,6 +297,10 @@ class SQLiteStore:
                 bundle.facts.append(item)
             elif kind == MemoryKind.HYPOTHESIS:
                 bundle.hypotheses.append(item)
+            elif kind == MemoryKind.EXPERIMENT:
+                bundle.experiments.append(item)
+            elif kind == MemoryKind.LESSON:
+                bundle.lessons.append(item)
             elif kind == MemoryKind.DECISION:
                 bundle.decisions.append(item)
             elif kind == MemoryKind.CONSTRAINT:

@@ -51,18 +51,22 @@ def test_case_buckets_by_kind(store: SQLiteStore) -> None:
     _observe(store, scope, MemoryKind.FACT, {"text": "f1"})
     _observe(store, scope, MemoryKind.FACT, {"text": "f2"})
     _observe(store, scope, MemoryKind.HYPOTHESIS, {"text": "h1"})
+    _observe(store, scope, MemoryKind.EXPERIMENT, {"action": "test thing"})
+    _observe(store, scope, MemoryKind.LESSON, {"text": "always check framing"})
     _observe(store, scope, MemoryKind.DECISION, {"text": "d1"})
-    _observe(store, scope, MemoryKind.CONSTRAINT, {"text": "lesson"})
-    _observe(store, scope, MemoryKind.NOTE, {"text": "experiment"})
+    _observe(store, scope, MemoryKind.CONSTRAINT, {"text": "constraint"})
+    _observe(store, scope, MemoryKind.NOTE, {"text": "note"})
     _observe(store, scope, MemoryKind.NEXT_ACTION, {
         "project": "p", "action": "do thing",
     })
 
     bundle = store.get_case(GetCaseRequest(scope=scope))
 
-    assert bundle.total_memories == 7
+    assert bundle.total_memories == 9
     assert len(bundle.facts) == 2
     assert len(bundle.hypotheses) == 1
+    assert len(bundle.experiments) == 1
+    assert len(bundle.lessons) == 1
     assert len(bundle.decisions) == 1
     assert len(bundle.constraints) == 1
     assert len(bundle.notes) == 1
@@ -205,6 +209,47 @@ def test_case_last_touch_is_max_updated(store: SQLiteStore) -> None:
     bundle_after = store.get_case(GetCaseRequest(scope=scope))
     assert bundle_after.last_touch is not None
     assert bundle_after.last_touch >= touch_before
+
+
+def test_case_record_relations(store: SQLiteStore) -> None:
+    """Case-record relations (confirmed_by, ruled_out_by, evidence_for) work."""
+    scope = "case:relations"
+    experiment_id = _observe(store, scope, MemoryKind.EXPERIMENT, {
+        "action": "switched framing",
+    })
+    fact_id = _observe(store, scope, MemoryKind.FACT, {"text": "framing matters"})
+
+    # Commit the fact with a confirmed_by link to the experiment
+    store.commit_memory(CommitMemoryRequest(
+        memory_id=fact_id,
+        reliance_class=RelianceClass.ACTIONABLE,
+        premises=[PremiseRef(
+            memory_id=experiment_id,
+            relation="confirmed_by",
+            strength="hard",
+        )],
+    ))
+
+    # Verify the link is queryable via explain
+    resp = store.explain_memory(fact_id)
+    assert any(p.relation == "confirmed_by" for p in resp.premises)
+
+    # And ruled_out_by on a hypothesis
+    hyp_id = _observe(store, scope, MemoryKind.HYPOTHESIS, {"claim": "wrong"})
+    store.observe_memory(ObserveMemoryRequest(
+        scope=scope,
+        kind=MemoryKind.NOTE,
+        basis=Basis.DIRECT_CAPTURE,
+        content={"action": "test that disproves"},
+        premises=[PremiseRef(
+            memory_id=hyp_id,
+            relation="ruled_out_by",
+            strength="soft",
+        )],
+    ))
+    # The hypothesis should have a dependent with that relation
+    resp_h = store.explain_memory(hyp_id)
+    assert any(d.relation == "ruled_out_by" for d in resp_h.dependents)
 
 
 def test_case_scope_isolation(store: SQLiteStore) -> None:

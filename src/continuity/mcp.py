@@ -79,6 +79,7 @@ TOOLS: list[dict[str, Any]] = [
                     "enum": [
                         "fact", "note", "decision", "hypothesis",
                         "summary", "constraint", "project_state", "next_action",
+                        "experiment", "lesson",
                     ],
                     "description": "Kind of memory object.",
                 },
@@ -217,6 +218,7 @@ TOOLS: list[dict[str, Any]] = [
                     "enum": [
                         "fact", "note", "decision", "hypothesis",
                         "summary", "constraint", "project_state", "next_action",
+                        "experiment", "lesson",
                     ],
                     "description": "Filter by kind.",
                 },

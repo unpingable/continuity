@@ -23,6 +23,7 @@ from continuity.api.models import (
     ActorRef,
     Basis,
     CommitMemoryRequest,
+    GetCaseRequest,
     MemoryKind,
     MemoryStatus,
     ObserveMemoryRequest,
@@ -107,6 +108,12 @@ def cmd_init(args: argparse.Namespace) -> None:
     store = _get_store(args)
     db_path = Path(args.db) if args.db else DEFAULT_DB_PATH
     print(f"initialized: {db_path}")
+
+
+def cmd_migrate(args: argparse.Namespace) -> None:
+    store = _get_store(args)
+    result = store.migrate_schema()
+    _out(result)
 
 
 def cmd_observe(args: argparse.Namespace) -> None:
@@ -249,6 +256,65 @@ def cmd_explain(args: argparse.Namespace) -> None:
     _out(resp)
 
 
+def cmd_case(args: argparse.Namespace) -> None:
+    store = _get_store(args)
+    bundle = store.get_case(GetCaseRequest(
+        scope=args.scope,
+        include_expired=args.include_expired,
+    ))
+
+    if args.json:
+        _out(bundle)
+        return
+
+    # Human-readable rendering
+    print(f"# {bundle.title or bundle.scope}")
+    print(f"scope: {bundle.scope}")
+    print(f"total memories: {bundle.total_memories}")
+    if bundle.last_touch:
+        print(f"last touch: {bundle.last_touch}")
+    print()
+
+    if bundle.summary:
+        s = bundle.summary
+        rely_marker = "✓" if s.rely_ok else "·"
+        print(f"## summary [{s.memory.status}] {rely_marker}")
+        for k, v in s.memory.content.items():
+            if k == "title":
+                continue
+            print(f"  {k}: {v}")
+        print()
+
+    def _render_bucket(label: str, items: list) -> None:
+        if not items:
+            return
+        print(f"## {label} ({len(items)})")
+        for item in items:
+            rely_marker = "✓" if item.rely_ok else "·"
+            status = item.memory.status
+            content = item.memory.content
+            primary = (
+                content.get("text")
+                or content.get("claim")
+                or content.get("action")
+                or content.get("title")
+                or content.get("decision")
+                or next(iter(content.values()), "")
+            )
+            primary_str = str(primary)[:120]
+            print(f"  {rely_marker} [{status}] {item.memory.memory_id[:16]}  {primary_str}")
+        print()
+
+    _render_bucket("facts", bundle.facts)
+    _render_bucket("hypotheses", bundle.hypotheses)
+    _render_bucket("experiments", bundle.experiments)
+    _render_bucket("lessons", bundle.lessons)
+    _render_bucket("decisions", bundle.decisions)
+    _render_bucket("constraints", bundle.constraints)
+    _render_bucket("notes", bundle.notes)
+    _render_bucket("other", bundle.other)
+
+
 def cmd_stats(args: argparse.Namespace) -> None:
     store = _get_store(args)
     with store._connect() as conn:
@@ -298,6 +364,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # init
     sub.add_parser("init", help="initialize the database")
+
+    # migrate
+    sub.add_parser(
+        "migrate",
+        help="patch CHECK constraints on existing tables to match current schema",
+    )
 
     # observe
     p_obs = sub.add_parser("observe", help="observe a new memory")
@@ -358,6 +430,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_exp = sub.add_parser("explain", help="explain a memory (lineage, premises, rely_ok)")
     p_exp.add_argument("memory_id")
 
+    # case
+    p_case = sub.add_parser(
+        "case",
+        help="show a derived case bundle for a scope",
+    )
+    p_case.add_argument("scope", help="scope identifying the case")
+    p_case.add_argument(
+        "--json", action="store_true",
+        help="output the bundle as JSON instead of human-readable form",
+    )
+    p_case.add_argument(
+        "--include-expired", action="store_true",
+        help="include expired memories",
+    )
+
     # stats
     sub.add_parser("stats", help="show database statistics")
 
@@ -366,12 +453,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMANDS = {
     "init": cmd_init,
+    "migrate": cmd_migrate,
     "observe": cmd_observe,
     "commit": cmd_commit,
     "revoke": cmd_revoke,
     "get": cmd_get,
     "query": cmd_query,
     "explain": cmd_explain,
+    "case": cmd_case,
     "stats": cmd_stats,
 }
 

@@ -62,6 +62,8 @@ class MemoryKind(StrEnum):
     CONSTRAINT = "constraint"
     PROJECT_STATE = "project_state"
     NEXT_ACTION = "next_action"
+    EXPERIMENT = "experiment"
+    LESSON = "lesson"
 
 
 class RelianceClass(StrEnum):
@@ -101,6 +103,10 @@ class LinkRelation(StrEnum):
     SUPERSEDES = "supersedes"
     INVALIDATES = "invalidates"
     ABOUT = "about"
+    # Case-record vocabulary: investigation/debugging structure
+    EVIDENCE_FOR = "evidence_for"
+    CONFIRMED_BY = "confirmed_by"
+    RULED_OUT_BY = "ruled_out_by"
 
 
 class LinkStrength(StrEnum):
@@ -485,6 +491,8 @@ class CaseBundle(JsonModel):
 
     facts: list[CaseItem] = Field(default_factory=list)
     hypotheses: list[CaseItem] = Field(default_factory=list)
+    experiments: list[CaseItem] = Field(default_factory=list)
+    lessons: list[CaseItem] = Field(default_factory=list)
     decisions: list[CaseItem] = Field(default_factory=list)
     constraints: list[CaseItem] = Field(default_factory=list)
     notes: list[CaseItem] = Field(default_factory=list)
