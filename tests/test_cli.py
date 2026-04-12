@@ -68,6 +68,58 @@ def test_observe_quiet(db_path: str) -> None:
     assert "\n" not in output.strip()
 
 
+def test_bootstrap_writes_mcp_json(tmp_path: Path) -> None:
+    target = tmp_path / "myproject"
+    target.mkdir()
+    run(str(tmp_path / "unused.db"), [
+        "bootstrap", str(target),
+    ])
+    mcp_json = target / ".mcp.json"
+    assert mcp_json.exists()
+    config = json.loads(mcp_json.read_text())
+    assert "continuity" in config["mcpServers"]
+    server = config["mcpServers"]["continuity"]
+    assert server["command"].endswith("continuity-mcp")
+    assert server["args"] == []
+    # No env block when no workspace/principal specified
+    assert "env" not in server
+
+
+def test_bootstrap_with_workspace(tmp_path: Path) -> None:
+    target = tmp_path / "proj"
+    target.mkdir()
+    run(str(tmp_path / "unused.db"), [
+        "bootstrap", str(target),
+        "--workspace", "observatory-family",
+        "--principal-id", "claude:mcp:on-behalf-of:jbeck",
+    ])
+    config = json.loads((target / ".mcp.json").read_text())
+    env = config["mcpServers"]["continuity"]["env"]
+    assert env["CONTINUITY_WORKSPACE"] == "observatory-family"
+    assert env["CONTINUITY_PRINCIPAL_ID"] == "claude:mcp:on-behalf-of:jbeck"
+
+
+def test_bootstrap_refuses_overwrite(tmp_path: Path) -> None:
+    target = tmp_path / "proj2"
+    target.mkdir()
+    (target / ".mcp.json").write_text("{}")
+    with pytest.raises(SystemExit):
+        run(str(tmp_path / "unused.db"), [
+            "bootstrap", str(target),
+        ])
+
+
+def test_bootstrap_force_overwrites(tmp_path: Path) -> None:
+    target = tmp_path / "proj3"
+    target.mkdir()
+    (target / ".mcp.json").write_text("{}")
+    run(str(tmp_path / "unused.db"), [
+        "bootstrap", str(target), "--force",
+    ])
+    config = json.loads((target / ".mcp.json").read_text())
+    assert "continuity" in config["mcpServers"]
+
+
 def test_latest_command(db_path: str) -> None:
     run(db_path, ["init"])
 

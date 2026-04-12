@@ -142,6 +142,65 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"initialized: {db_path} (source={source})")
 
 
+def cmd_bootstrap(args: argparse.Namespace) -> None:
+    """Write .mcp.json into a project root so Claude Code can use continuity."""
+    import shutil
+
+    target_dir = Path(args.target).expanduser().resolve()
+    mcp_json_path = target_dir / ".mcp.json"
+
+    if mcp_json_path.exists() and not args.force:
+        print(f"error: {mcp_json_path} already exists (use --force to overwrite)",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Find the continuity-mcp binary
+    mcp_bin = shutil.which("continuity-mcp")
+    if mcp_bin is None:
+        # Try the venv that's running this CLI
+        candidate = Path(sys.executable).parent / "continuity-mcp"
+        if candidate.exists():
+            mcp_bin = str(candidate)
+    if mcp_bin is None:
+        print("error: cannot find continuity-mcp binary on PATH or in current venv",
+              file=sys.stderr)
+        sys.exit(1)
+
+    env_block: dict[str, str] = {}
+    if args.workspace:
+        env_block["CONTINUITY_WORKSPACE"] = args.workspace
+    if args.principal_id:
+        env_block["CONTINUITY_PRINCIPAL_ID"] = args.principal_id
+
+    config: dict[str, Any] = {
+        "mcpServers": {
+            "continuity": {
+                "command": mcp_bin,
+                "args": [],
+                **({"env": env_block} if env_block else {}),
+            }
+        }
+    }
+
+    mcp_json_path.write_text(json.dumps(config, indent=2) + "\n")
+
+    print(f"wrote {mcp_json_path}")
+    print()
+    print(f"  command: {mcp_bin}")
+    if args.workspace:
+        print(f"  workspace: {args.workspace}")
+    if args.principal_id:
+        print(f"  principal: {args.principal_id}")
+    print()
+    print("Next steps:")
+    print("  1. Restart Claude Code in this project (or reload MCP servers)")
+    print("  2. The continuity tools will appear automatically")
+    if args.workspace:
+        print(f"  3. Memories will go to workspace '{args.workspace}'")
+    else:
+        print("  3. Memories will go to the project-local store (.continuity/db.sqlite)")
+
+
 def cmd_where(args: argparse.Namespace) -> None:
     """Show the active database path, how it was resolved, and its identity."""
     db_path, source = _resolve(args)
@@ -534,6 +593,28 @@ def build_parser() -> argparse.ArgumentParser:
     # init
     sub.add_parser("init", help="initialize the database")
 
+    # bootstrap
+    p_boot = sub.add_parser(
+        "bootstrap",
+        help="write .mcp.json into a project so Claude Code can use continuity",
+    )
+    p_boot.add_argument(
+        "target", nargs="?", default=".",
+        help="project root directory (default: current directory)",
+    )
+    p_boot.add_argument(
+        "--workspace", default=None, metavar="ID",
+        help="pin this project to a named workspace store",
+    )
+    p_boot.add_argument(
+        "--principal-id", default=None,
+        help="set CONTINUITY_PRINCIPAL_ID in the MCP env (e.g., 'claude:mcp:on-behalf-of:jbeck')",
+    )
+    p_boot.add_argument(
+        "--force", action="store_true",
+        help="overwrite existing .mcp.json",
+    )
+
     # where
     p_where = sub.add_parser(
         "where",
@@ -695,6 +776,7 @@ def cmd_workspace(args: argparse.Namespace) -> None:
 
 COMMANDS = {
     "init": cmd_init,
+    "bootstrap": cmd_bootstrap,
     "migrate": cmd_migrate,
     "where": cmd_where,
     "workspace": cmd_workspace,
