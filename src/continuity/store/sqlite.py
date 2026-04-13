@@ -13,6 +13,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+# Bump this when the schema.sql shape changes (new tables, columns,
+# CHECK constraint expansions). It is the store/schema substrate version,
+# not the package version. Stored in store_metadata so receipts and
+# cross-system consumers can pin which schema shape produced an answer.
+SCHEMA_VERSION = 2
+
 from continuity.api.models import (
     ActorRef,
     Basis,
@@ -149,6 +155,10 @@ class SQLiteStore:
         }
         if "scope_kind" not in existing:
             conn.execute("ALTER TABLE store_metadata ADD COLUMN scope_kind TEXT NULL")
+        if "schema_version" not in existing:
+            conn.execute(
+                "ALTER TABLE store_metadata ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
+            )
 
     def _ensure_store_metadata(
         self,
@@ -184,13 +194,14 @@ class SQLiteStore:
 
         conn.execute(
             "INSERT INTO store_metadata "
-            "(id, store_id, project_hint, git_root, scope_kind, created_at) "
-            "VALUES (1, ?, ?, ?, ?, ?)",
+            "(id, store_id, project_hint, git_root, scope_kind, schema_version, created_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?)",
             (
                 new_id("store"),
                 project_hint,
                 str(git_root) if git_root is not None else None,
                 scope_kind,
+                SCHEMA_VERSION,
                 isoformat_now(),
             ),
         )
@@ -199,7 +210,8 @@ class SQLiteStore:
         """Return the singleton store metadata row, or None if not set."""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT store_id, project_hint, git_root, scope_kind, created_at "
+                "SELECT store_id, project_hint, git_root, scope_kind, "
+                "schema_version, created_at "
                 "FROM store_metadata WHERE id = 1"
             ).fetchone()
             if row is None:
@@ -209,6 +221,7 @@ class SQLiteStore:
                 "project_hint": row["project_hint"],
                 "git_root": row["git_root"],
                 "scope_kind": row["scope_kind"],
+                "schema_version": row["schema_version"],
                 "created_at": row["created_at"],
             }
 

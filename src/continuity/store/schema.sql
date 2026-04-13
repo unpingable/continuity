@@ -118,12 +118,13 @@ CREATE TABLE IF NOT EXISTS memory_events (
 -- Singleton metadata about this store: identity and provenance.
 -- Lets operators tell which database an artifact came from without vibes.
 CREATE TABLE IF NOT EXISTS store_metadata (
-    id            INTEGER PRIMARY KEY CHECK (id = 1),
-    store_id      TEXT NOT NULL UNIQUE,
-    project_hint  TEXT NULL,
-    git_root      TEXT NULL,
-    scope_kind    TEXT NULL,  -- 'project' | 'workspace' | 'global' | 'explicit'
-    created_at    TEXT NOT NULL
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    store_id        TEXT NOT NULL UNIQUE,
+    project_hint    TEXT NULL,
+    git_root        TEXT NULL,
+    scope_kind      TEXT NULL,  -- 'project' | 'workspace' | 'global' | 'explicit'
+    schema_version  INTEGER NOT NULL DEFAULT 1,  -- store/schema substrate version
+    created_at      TEXT NOT NULL
 );
 
 -- Async ingest tracking

@@ -135,11 +135,10 @@ def cmd_init(args: argparse.Namespace) -> None:
     db_path, source = _resolve(args)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     store = SQLiteStore(db_path)
-    store.initialize(
-        scope_kind=source_to_scope_kind(source),
-        scope_label=_scope_label(args, source),
-    )
-    print(f"initialized: {db_path} (source={source})")
+    scope_kind = getattr(args, "scope_kind", None) or source_to_scope_kind(source)
+    scope_label = getattr(args, "scope_label", None) or _scope_label(args, source)
+    store.initialize(scope_kind=scope_kind, scope_label=scope_label)
+    print(f"initialized: {db_path} (source={source}, scope_kind={scope_kind})")
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> None:
@@ -230,6 +229,7 @@ def cmd_where(args: argparse.Namespace) -> None:
         print(f"store_id:     {m.get('store_id')}")
         print(f"project_hint: {m.get('project_hint')}")
         print(f"stored_kind:  {m.get('scope_kind') or '(none)'}")
+        print(f"schema_ver:   {m.get('schema_version')}")
         print(f"git_root:     {m.get('git_root') or '(none)'}")
         print(f"created_at:   {m.get('created_at')}")
 
@@ -300,6 +300,15 @@ def cmd_workspace_remove_project(args: argparse.Namespace) -> None:
     _out(manifest)
 
 
+def _resolve_memory_id(args: argparse.Namespace) -> str:
+    """Resolve memory_id from either positional arg or --memory-id flag."""
+    mid = getattr(args, "memory_id_flag", None) or args.memory_id
+    if mid is None:
+        print("error: memory_id is required (positional or --memory-id)", file=sys.stderr)
+        sys.exit(1)
+    return mid
+
+
 def cmd_migrate(args: argparse.Namespace) -> None:
     store = _get_store(args)
     result = store.migrate_schema()
@@ -347,6 +356,7 @@ def cmd_observe(args: argparse.Namespace) -> None:
 
 def cmd_commit(args: argparse.Namespace) -> None:
     store = _get_store(args)
+    memory_id = _resolve_memory_id(args)
 
     actor = None
     if args.actor:
@@ -355,7 +365,7 @@ def cmd_commit(args: argparse.Namespace) -> None:
     premises = [_parse_premise(p) for p in (args.premise or [])]
 
     req = CommitMemoryRequest(
-        memory_id=args.memory_id,
+        memory_id=memory_id,
         reliance_class=args.reliance_class,
         approved_by=actor,
         note=args.note,
@@ -382,13 +392,14 @@ def cmd_commit(args: argparse.Namespace) -> None:
 
 def cmd_revoke(args: argparse.Namespace) -> None:
     store = _get_store(args)
+    memory_id = _resolve_memory_id(args)
 
     actor = None
     if args.actor:
         actor = ActorRef(principal_id=args.actor, auth_method="cli")
 
     req = RevokeMemoryRequest(
-        memory_id=args.memory_id,
+        memory_id=memory_id,
         reason=args.reason,
         revoked_by=actor,
         replacement_memory_id=args.replacement,
@@ -591,7 +602,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # init
-    sub.add_parser("init", help="initialize the database")
+    p_init = sub.add_parser("init", help="initialize the database")
+    p_init.add_argument(
+        "--scope-kind", default=None,
+        choices=["project", "workspace", "global", "explicit"],
+        help=(
+            "stamp scope kind in store_metadata on first init. "
+            "Auto-derived from resolver source if not provided."
+        ),
+    )
+    p_init.add_argument(
+        "--scope-label", default=None,
+        help="human label for this store (overrides auto-derived project_hint)",
+    )
 
     # bootstrap
     p_boot = sub.add_parser(
@@ -677,7 +700,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # commit
     p_cmt = sub.add_parser("commit", help="commit an observed memory")
-    p_cmt.add_argument("memory_id")
+    p_cmt.add_argument("memory_id", nargs="?", default=None)
+    p_cmt.add_argument("--memory-id", dest="memory_id_flag", default=None)
     p_cmt.add_argument(
         "--reliance-class", default="retrieve_only",
         choices=[r.value for r in RelianceClass],
@@ -692,7 +716,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # revoke
     p_rev = sub.add_parser("revoke", help="revoke a memory")
-    p_rev.add_argument("memory_id")
+    p_rev.add_argument("memory_id", nargs="?", default=None)
+    p_rev.add_argument("--memory-id", dest="memory_id_flag", default=None)
     p_rev.add_argument("--reason", required=True)
     p_rev.add_argument("--replacement", default=None, help="replacement memory_id")
     p_rev.add_argument("--actor", help="principal_id for revoker")
