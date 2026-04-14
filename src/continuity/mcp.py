@@ -121,7 +121,19 @@ TOOLS: list[dict[str, Any]] = [
                         "type": "object",
                         "properties": {
                             "memory_id": {"type": "string"},
-                            "relation": {"type": "string"},
+                            "relation": {
+                                "type": "string",
+                                "enum": [
+                                    "depends_on", "supports", "derived_from",
+                                    "implements", "supersedes", "invalidates",
+                                    "about", "evidence_for", "confirmed_by",
+                                    "ruled_out_by",
+                                ],
+                                "description": (
+                                    "How this premise relates to the memory. "
+                                    "Default: depends_on."
+                                ),
+                            },
                             "strength": {"type": "string", "enum": ["hard", "soft"]},
                             "note": {"type": "string"},
                         },
@@ -174,7 +186,19 @@ TOOLS: list[dict[str, Any]] = [
                         "type": "object",
                         "properties": {
                             "memory_id": {"type": "string"},
-                            "relation": {"type": "string"},
+                            "relation": {
+                                "type": "string",
+                                "enum": [
+                                    "depends_on", "supports", "derived_from",
+                                    "implements", "supersedes", "invalidates",
+                                    "about", "evidence_for", "confirmed_by",
+                                    "ruled_out_by",
+                                ],
+                                "description": (
+                                    "How this premise relates to the memory. "
+                                    "Default: depends_on."
+                                ),
+                            },
                             "strength": {"type": "string", "enum": ["hard", "soft"]},
                             "note": {"type": "string"},
                         },
