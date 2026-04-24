@@ -5,8 +5,12 @@
       "args": ["/home/jbeck/git/continuity/mcp_ping_server.py"]
     },
     "continuity": {
-      "command": "/home/jbeck/git/continuity/.venv/bin/python3",
-      "args": ["-m", "continuity.mcp"]
+      "command": "/home/jbeck/git/continuity/.venv/bin/continuity-mcp",
+      "args": [],
+      "env": {
+        "CONTINUITY_WORKSPACE": "observatory-family",
+        "CONTINUITY_PRINCIPAL_ID": "claude:mcp:on-behalf-of:jbeck"
+      }
     }
   }
 }
