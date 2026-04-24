@@ -113,6 +113,14 @@ The contract for what downstream computation may do with a committed memory:
 
 Reliance class is assigned at commit time and can be raised by re-committing (within policy). The class is independent of `LinkRelation` — it answers "how may this memory be used," not "how does this memory relate to another."
 
+### expires_at
+
+A horizon on admissibility. Set at observe or commit time; carried on the memory object; honored by `rely_ok`.
+
+Use `expires_at` whenever a committed memory represents a tolerance, exception, temporary allowance, windowed operational judgment, or any other claim that is only admissible under a bounded horizon. Expiry is part of the object's admissibility, not optional metadata.
+
+After the horizon passes, the memory remains as historical evidence — queryable, explainable, auditable — but `rely_ok` returns false and queries filter it out by default (`include_expired=False`). This is the mechanism by which "acceptable for now" does not decay into "acceptable in general."
+
 ## Storage Layers
 
 Three tables carry the core state:
@@ -134,6 +142,12 @@ These are the rules that make continuity *continuity*. They are invariant across
 ### Historical structure is never destroyed
 
 Revocation is by event, not by deletion. Revoked memories, revoked links, superseded versions — all remain as evidence. `explain()` reads taint from source status at query time. Tombstones over disappearance.
+
+### Temporal admissibility must not decay into durable legitimacy
+
+When a memory is only admissible under a bounded horizon, that horizon must be carried explicitly via `expires_at`. Once the horizon passes, the memory may remain as historical evidence, but it must not remain rely-able as current authority or standing permission. Tolerances, exceptions, and windowed operational judgments are admissible *for a time*, and that time is part of the commitment, not a footnote.
+
+Remember the leash, not just the dog.
 
 ### Retrieval is not authority
 
@@ -166,6 +180,17 @@ Scope boundaries, tier boundaries, import boundaries — the chain remains walka
 - **Not a vector database or semantic search engine.** Retrieval is by explicit scope/kind/status, not by similarity.
 - **Not an LLM summarization tool.** The daemon persists structure, not vibes.
 - **Not a distributed system.** Local SQLite per project. Cross-scope reference is by import with hash pinning, not by federated consensus.
+
+## Operator Cadence
+
+Continuity does not page you. Nothing in the substrate decides when an agent should consult it, and nothing prompts an agent to write back. That is deliberate — the alternative (instrumenting every conversational turn) would drown the signal in noise.
+
+The honest split:
+
+- **Interactive / exploratory work** — the operator's cadence. A human nudge ("go check continuity," "write that down before we lose it") is the right mechanism. Scope is moving, judgment about what matters is human-shaped, and the cost of forgetting is usually a re-derivation, not a corruption.
+- **Repo, debug/production, cross-session handoff, supersession of prior decisions** — worth structural hooks eventually. The cost of forgetting is ugly (silent supersession, rely-like claims with no basis, durable state lost on session close). Hygiene receipts and passive preflight belong here, not in the chat path. Whether and when those hooks get built is a Governor question, not a continuity one (continuity exposes the surfaces; Governor decides when their use is expected).
+
+A useful starting heuristic: if the work is repo-shaped or production-shaped, assume continuity is in scope and consult before acting. Otherwise, trust the operator to nudge.
 
 ## Related Reading
 
