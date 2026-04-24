@@ -7,7 +7,8 @@ A map of this directory. Start from the top if you're new.
 1. [`../README.md`](../README.md) — narrative onboarding: why this exists and what it does
 2. [`concepts.md`](concepts.md) — canonical mental model and vocabulary; the constitution
 3. [`integrations.md`](integrations.md) — how to talk to continuity (MCP, CLI, library)
-4. [`gaps/`](gaps/) — proposed doctrine for architectural shifts
+4. [`scoping.md`](scoping.md) — when to write to continuity, and at what weight
+5. [`gaps/`](gaps/) — proposed doctrine for architectural shifts
 
 ## Contents
 
@@ -15,6 +16,7 @@ A map of this directory. Start from the top if you're new.
 |------|--------------|
 | [`concepts.md`](concepts.md) | Core model (observe/commit/rely), scope and identity, cross-cutting invariants, what continuity is *not* |
 | [`integrations.md`](integrations.md) | MCP server, `contctl` CLI, and Python library — each as a reference, with minimal examples and entry points |
+| [`scoping.md`](scoping.md) | Workflow discipline: choosing between repo docs / Claude memory / continuity; selecting scope, kind, basis, reliance class; anti-patterns and new-repo bootstrap |
 | [`gaps/`](gaps/) | Gap specs: proposed doctrine for load-bearing architectural or storage shifts, before implementation |
 
 ## Agent instruction files (not in this directory)
