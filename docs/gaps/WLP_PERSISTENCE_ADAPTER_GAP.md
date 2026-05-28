@@ -1,8 +1,8 @@
-# Candidate: WLP Persistence Adapter — continuity as a custody-preserving persistence substrate for WLP artifacts
+# Gap: WLP Persistence Adapter — continuity as a custody-preserving persistence substrate for WLP artifacts
 
-**Status:** candidate (not gap-spec, not implementation, not a build plan)
-**Originated:** 2026-05-28
-**Last updated:** 2026-05-28 — reframed from "WLP Receipt Custody / custody adapter / WLP router" wording. WLP's artifact wire grammar carries a load-bearing `custody` block, which made "custody adapter" a namespace collision; "router" over-named continuity's plausible role. Continuity's role is **persistence / custody preservation**, not routing or transport. The seam is a **WLP persistence adapter** — equivalently a **custody-preserving persistence adapter**.
+**Status:** graduated from candidate 2026-05-28 (all four graduation triggers MET — see "Graduation triggers" section); V1 implementation in progress per `docs/MVP_A_SLICE_5_PACKET.md`.
+**Originated:** 2026-05-28 (candidate)
+**Last updated:** 2026-05-28 — graduated from `docs/candidates/` to `docs/gaps/` under MVP-A forcing pressure (NS live demo loop on sushi-k). Doctrine layer (keepers, scope, boundary, persistence-vs-transport split, twelve invariants, not-in-scope) is preserved verbatim from the candidate; implementation scope is appended as a new section. Original reframe note retained: WLP's artifact wire grammar carries a load-bearing `custody` block, which made "custody adapter" a namespace collision; "router" over-named continuity's plausible role. Continuity's role is **persistence / custody preservation**, not routing or transport. The seam is a **WLP persistence adapter** — equivalently a **custody-preserving persistence adapter**.
 **Depends on:** WLP wire format reaching stability for `AuthorizationReceipt` and `RevocationReceipt`; an explicit adapter/gap before any integration is implemented
 **Related:** `~/git/cartography/coordination/wlp-notes-as-wire-layer-for-standing-boundary.md` (the layer picture that names "adopter — storage, discovery, UX, audit aggregation"); `~/git/cartography/coordination/nq-REMOTE_STANDING_BOUNDARY.md` (the doctrine whose receipts WLP serializes); `~/git/wlp/WLP_STANDING_BOUNDARY_CROSSREF.md` (authoritative WLP-side statement); gaps `CROSS_SCOPE_REFERENCE_GAP.md` (substrate for cross-store identity) and `CROSS_COMPONENT_RELIANCE_GAP.md` (consumer doctrine on top)
 
@@ -110,18 +110,95 @@ The candidate's job is to make all three visible so a future gap-spec inherits t
 
 ## Graduation triggers
 
-This candidate becomes a gap-spec when:
+All four triggers below were MET on 2026-05-28. The candidate is graduated to a gap-spec on that date.
 
-- WLP wire format for `AuthorizationReceipt` and `RevocationReceipt` reaches a stability point where a continuity-side persistence mapping is meaningful.
-- A consumer (Wicket / Nightshift / Standing-the-tool / NQ / AG) names continuity as the persistence surface it wants WLP artifacts to live in.
-- The first forcing case demonstrates a concrete custody flow continuity would have to support — write path, index path, retrieve path, or import path.
-- A federated or cross-host custody requirement makes the remote-standing-boundary composition non-deferrable.
+- ✅ **WLP wire format stability** — `AuthorizationReceipt` reached v0.2 per Cartographer's 2026-05-28 re-audit; `RevocationReceipt` remains future work and stays out of this V1.
+- ✅ **A consumer names continuity as the persistence surface** — NS + orchestrator on `sushi-k` (per `~/git/nightshift/docs/working/decisions/MVP_A_SLICES_2_3_4_PACKET.md`).
+- ✅ **First forcing case** — MVP-A `disk_pressure` finding flowing through the full pipeline; HandlingReceipt sample at `/tmp/mvp-a-demo/ns-wlp-handling-run_eccbc954b4fc4119b2c4cf332bea2956.json` with `artifact_hash = sha256:86126707b3974f5c160deabca6df9e968da17baab4c48cadaffb221b1ff47b19`.
+- ✅ **Cross-host composition pressure** — the demo loop runs from NS on `sushi-k` into continuity locally; federation/cross-host receipts are imminent per cartographer's Path B planning. The remote-standing-boundary composition is named in `CROSS_SCOPE_REFERENCE_GAP` and `CROSS_COMPONENT_RELIANCE_GAP` (trigger notes added 2026-05-28).
 
 A *separate* gap is filed (not this one graduating) when a consumer demands transport / eventing / subscription / revocation propagation behavior on top of continuity's WLP persistence. That gap composes against the persistence-vs-transport split named here.
 
-Per the candidates discipline: graduate when implementation pressure proves the framing underspecified, not when downstream events merely happen.
+Per the gap-spec discipline: this V1 ships the smallest slice that proves the persistence shape (Slice 5 in `docs/MVP_A_SLICE_5_PACKET.md`); transport, federation, multi-host import, and the broader receipt-type taxonomy are explicitly deferred.
 
-## Not in scope, even at candidate stage
+## Implementation scope (V1, per docs/MVP_A_SLICE_5_PACKET.md)
+
+V1 covers persistence of WLP HandlingReceipts and AuthorizationReceipts. Revocation is named-and-deferred until WLP wire format for `RevocationReceipt` stabilizes and a consumer demands it.
+
+### Storage strategy
+
+V1 reuses the existing `ReceiptType.MEMORY_IMPORT` audit-receipt type — Option B per the packet. No `ReceiptType` enum extension, no schema migration.
+
+A WLP artifact is persisted as a continuity `memory_object` with:
+
+- `basis = IMPORT` (forced by the import path; matches "we received this from elsewhere")
+- `kind = NOTE` (least-semantic existing kind; the actual WLP semantic is in the envelope content, not the continuity kind)
+- `status = OBSERVED` (the WLP envelope is in custody; continuity does not promote it to COMMITTED on store — invariant 6: imported ≠ accepted)
+- `reliance_class = NONE` (continuity does not decide reliance — invariant 12)
+- `confidence = 0.5` (neutral; continuity does not vouch for the envelope's claim)
+- `content` = the WLP envelope as a JSON object, byte-identical to the canonical input (after `json.loads`/`json.dumps(sort_keys=True, separators=(',',':'))` round-trip — verified inertness of the round-trip is part of acceptance)
+- `source_refs` = at minimum a `SourceRef(kind='wlp_artifact_hash', ref=<sha256:...>, note=<wlp_kind>)`; optionally a `file` source_ref pointing at the on-disk artifact path
+- `memory_id` = `mem_wlp_<sha256_hex>` (content-addressed from the WLP `artifact_hash`; same envelope → same memory_id → natural idempotency via `import_memory`'s existing (memory_id, content_hash) check)
+
+A `memory.import` receipt records the import act. The receipt's content (already shaped by the existing import path) records continuity's own content_hash; the WLP `artifact_hash` is preserved verbatim in `source_ref` (top-level `ImportMemoryRequest.source_ref`) and in the `memory_object.source_refs` list. Continuity's chain hash for that receipt is computed by `_build_receipt` per existing discipline; the WLP-provided hash is metadata, never the chain hash.
+
+### Adapter surface (library only — invariant 11: persistence ≠ transport)
+
+Module path: `src/continuity/adapters/wlp.py`. No CLI subcommand and no MCP tool in V1 — the adapter is library-only. Callers wire it into their own ingest pipeline.
+
+```python
+from continuity.adapters.wlp import (
+    WLPArtifactStored,
+    WLPNonCanonicalInputError,
+    store_wlp_artifact,
+    readback_wlp_artifact,
+    verify_wlp_artifact_hash,
+)
+
+result: WLPArtifactStored = store_wlp_artifact(
+    store=sqlite_store,
+    envelope_bytes=<canonical-JSON bytes of HandlingReceipt or AuthorizationReceipt>,
+    wlp_artifact_hash="sha256:...",        # WLP-provided, preserved verbatim
+    scope="wlp",                            # caller's choice of continuity scope
+    source_store_id="ns:nightshiftd",       # WLP issuer, recorded in import receipt
+    source_path="/tmp/.../ns-wlp-handling-*.json",  # optional on-disk provenance
+)
+# result.memory_id, result.receipt_id, result.wlp_artifact_hash, result.wlp_kind,
+# result.causal_parents
+
+# Readback through existing path:
+readback_bytes: bytes = readback_wlp_artifact(store, result.memory_id)
+assert readback_bytes == envelope_bytes  # byte-identical canonical bytes
+
+# Hash-match verification (storage-integrity check; not WLP semantic validation):
+assert verify_wlp_artifact_hash(readback_bytes, result.wlp_artifact_hash)
+```
+
+### Refusal-shaped checks
+
+The adapter signature must refuse to violate the twelve invariants. V1 enforces explicitly:
+
+- **`WLPNonCanonicalInputError`** is raised if the input bytes are not in canonical JSON form (no whitespace, sorted keys, compact). The adapter does not silently re-canonicalize input — the caller is expected to deliver canonical bytes. The check is `json.dumps(json.loads(bytes), sort_keys=True, separators=(",",":")).encode() == bytes`. (Storage hygiene; not WLP semantic validation.)
+- **No "is this valid?" parameter** on `store_wlp_artifact`. Validation belongs to WLP and to the issuing authority; continuity does not own it (invariant 1).
+- **No `get_canonical_for(subject)` API.** Canonicity is upstream (invariant 4).
+- **No `subscribe`, `notify`, `deliver`, `announce`, `publish`** on the adapter or on any module it touches. Transport is a separate gap (invariant 11).
+- **No call to `wlp::handle()` or any WLP policy check** at any point in the persistence path (invariant 8).
+- **No recompute of `wlp_artifact_hash` on store.** The WLP-provided hash is recorded verbatim in `source_refs` and `source_ref`. Recomputation is permitted only at verify-time on readback, and that recomputation is integrity-verification, not validation (invariant 7).
+
+### Hash-verification primitive (readback only)
+
+`verify_wlp_artifact_hash(envelope_bytes, expected_artifact_hash)` recomputes the WLP-compatible canonicalization (zero `custody.{artifact_hash, receipt_hash, signature}`, then JCS-style `sort_keys=True, separators=(",",":")`, then SHA-256) and compares to the expected hash. The check is storage-integrity (did the bytes come back unchanged?), not semantic validation (is the artifact's claim true?). Per invariant 1: a passing verify result does NOT make the artifact valid — only preserved.
+
+### Acceptance criteria (closes Slice 5 per packet)
+
+1. ✅ `docs/gaps/WLP_PERSISTENCE_ADAPTER_GAP.md` exists with the candidate's content + Implementation Scope (this section).
+2. Adapter accepts the MVP-A sample HandlingReceipt JSON at `/tmp/mvp-a-demo/ns-wlp-handling-run_eccbc954b4fc4119b2c4cf332bea2956.json` and stores it without error.
+3. Readback via continuity's existing memory-get path returns bytes that re-canonicalize to byte-identical canonical JSON (`readback_canonical == envelope_bytes`).
+4. `verify_wlp_artifact_hash(readback, "sha256:86126707...")` returns `True`.
+5. `explain(memory_id)` walks the lineage; the import receipt's content surfaces the WLP `artifact_hash`; the envelope's `custody.causal_parents` survives in the memory's content unchanged.
+6. Tests cover: round-trip identity, hash-match positive, hash-match negative on tampered bytes, idempotency (same envelope twice → same memory_id, single receipt).
+
+## Not in scope, even at gap stage
 
 - **Naming continuity as the canonical WLP persistence store by assertion.** Persistence fit is one option among several; the candidate does not pre-empt the architectural decision.
 - **Calling continuity a WLP router, transport, registry, discovery service, event stream, revocation propagator, or authority source.** The boundary list and the persistence/transport split exist to refuse these framings.

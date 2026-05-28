@@ -84,6 +84,22 @@ Emit locally. Ingest idempotently. Never silently harden. Revoke by event. Deriv
 
 Built on patterns the internet already learned: append-only logs, maildir-style durable objects, outbox/inbox, idempotent ingestion, tombstones over deletion, capability-scoped writers. Boring ancestors, healthy descendants.
 
+## Adopters
+
+Claude Code is one adopter — the one this README opens with — but the substrate is multi-adopter at code depth. The three verbs, hash-chained receipts, premise graph, and reliance verification are adopter-agnostic. Other adopters consume the same primitives via the Python library or `contctl` CLI without going through MCP.
+
+In development: the **WLP persistence adapter** (see [`docs/gaps/WLP_PERSISTENCE_ADAPTER_GAP.md`](docs/gaps/WLP_PERSISTENCE_ADAPTER_GAP.md)) — a custody-preserving persistence substrate for WLP-serialized receipts. The shape is exactly what the receipt-keeping primitives were built for, used by a non-Claude consumer.
+
+The discipline that lets this work: **persistence ≠ transport.** Continuity stores, indexes, retrieves, and preserves custody. It does not route, validate, deliver, propagate revocations, or decide reliance. Adopters bring their own validation, routing, and reliance logic — Continuity is the receipt store, not the reliance engine.
+
+The invariants below survive across all adopters:
+
+```
+stored ≠ valid          retrieved ≠ trusted        persistence ≠ transport
+indexed ≠ endorsed      latest ≠ canonical         missing ≠ false
+imported ≠ accepted     hash-chained ≠ ratified    receipt store ≠ reliance engine
+```
+
 ## License
 
 Apache-2.0

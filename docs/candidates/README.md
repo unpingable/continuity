@@ -38,4 +38,9 @@ Keep them short. A candidate that needs the full gap-spec structure is probably 
 | Note | Originated | One-line |
 |------|------------|----------|
 | [`MAP_SKEW.md`](MAP_SKEW.md) | 2026-05-20 | Directional belief-state error detection — memory has direction, not just age. Cross-organ; waiting on observation-side owner and time-discipline V2 substrate. |
-| [`WLP_PERSISTENCE_ADAPTER.md`](WLP_PERSISTENCE_ADAPTER.md) | 2026-05-28 | Continuity may serve as a WLP-compatible persistence substrate via an explicit WLP persistence adapter (a *custody-preserving persistence adapter*). Persistence ≠ transport; receipt store ≠ reliance engine. Not a router, transport, registry, discovery service, event stream, revocation propagator, or authority source — any such role is a separate gap. Keeper: *WLP preserves the artifact contract; continuity may preserve the artifact; consumers decide reliance.* |
+
+## Graduated
+
+| Note | Graduated | Now at |
+|------|-----------|--------|
+| WLP Persistence Adapter | 2026-05-28 | [`../gaps/WLP_PERSISTENCE_ADAPTER_GAP.md`](../gaps/WLP_PERSISTENCE_ADAPTER_GAP.md) — graduated under MVP-A forcing pressure; all four graduation triggers MET. |

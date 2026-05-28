@@ -12,6 +12,8 @@ How to talk to continuity. Three modes, one model. The vocabulary and invariants
 
 All three talk to the same on-disk SQLite stores. They share schema, receipt chains, and explain semantics. Choose the one that fits the process shape — the data is the same.
 
+**Adopter classes.** The MCP path is for Claude Code sessions; the library and CLI paths are adopter-agnostic. Non-Claude adopters (e.g., the WLP persistence adapter at [`gaps/WLP_PERSISTENCE_ADAPTER_GAP.md`](gaps/WLP_PERSISTENCE_ADAPTER_GAP.md)) integrate via the library or CLI without involving MCP. The substrate (verbs, schema, receipts, premise graph, rely check) is the same for all adopter classes. The discipline that holds across adopters: **persistence ≠ transport; receipt store ≠ reliance engine.** Continuity does not route, validate, propagate revocations, or decide reliance — adopters bring those.
+
 ## Store location
 
 Continuity resolves a store path in this order (first match wins):
