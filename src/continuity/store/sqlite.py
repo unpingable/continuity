@@ -29,6 +29,9 @@ from continuity.api.models import (
     EventType,
     ExplainMemoryResponse,
     GetCaseRequest,
+    ImportMemoryRequest,
+    ImportMemoryResponse,
+    ImportedPremiseStatus,
     LinkStatus,
     MemoryEvent,
     MemoryKind,
@@ -43,14 +46,18 @@ from continuity.api.models import (
     ReceiptRecord,
     ReceiptType,
     RelianceClass,
+    RepairMemoryRequest,
+    RepairMemoryResponse,
     RevokeMemoryRequest,
     RevokeMemoryResponse,
     SourceRef,
     StandingRef,
 )
-from continuity.util.clock import isoformat_now, to_isoformat
+from continuity.util.clock import isoformat_now, to_isoformat, utcnow
+from datetime import datetime
+from continuity.memory.policy import Decision, MemoryPolicy, PolicyResult
 from continuity.util.dbpath import find_git_root
-from continuity.util.hashing import receipt_hash
+from continuity.util.hashing import content_hash, receipt_hash, request_hash
 from continuity.util.ids import new_id
 from continuity.util.jsoncanon import canonical_json, from_json
 
@@ -115,9 +122,104 @@ class InvalidTransitionError(RuntimeError):
     pass
 
 
+class PolicyDeniedError(RuntimeError):
+    """Raised when MemoryPolicy denies a write. A refusal receipt has
+    already been appended to the receipt chain before this is raised, so
+    the denial is audit-visible even though no memory row was created.
+    """
+
+    def __init__(self, reason: str, refusal_receipt: ReceiptRecord) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.refusal_receipt = refusal_receipt
+
+
+class ContentHashMismatchError(RuntimeError):
+    """Raised when import sees an unexpected content_hash.
+
+    Two cases trigger this:
+      1. The caller's `expected_content_hash` does not match the hash
+         computed over the payload they supplied — defends against bad
+         payloads or stale pin metadata.
+      2. The memory already exists locally at a different content_hash
+         (the source has drifted since the local import). Per
+         docs/gaps/CROSS_SCOPE_REFERENCE_GAP.md, V1 refuses this case
+         rather than silently overwrite or fork — the operator handles
+         drift explicitly via revoke + re-import, or by importing a
+         supersede successor as a new memory_id.
+    """
+
+    def __init__(
+        self,
+        *,
+        memory_id: str,
+        expected: str,
+        actual: str,
+        reason: str,
+    ) -> None:
+        super().__init__(
+            f"content_hash mismatch for {memory_id}: expected {expected}, "
+            f"got {actual} ({reason})"
+        )
+        self.memory_id = memory_id
+        self.expected = expected
+        self.actual = actual
+        self.reason = reason
+
+
+class IslandWriteRefusedError(RuntimeError):
+    """Raised when a cross-project-shaped write would land in an isolated
+    project-local (or fallback-global) DB without explicit opt-in.
+
+    A `scope=global` memory in a project-local DB is "a local memory wearing
+    a fake mustache" (per docs/gaps/ISLANDS_OF_CONTINUITY.md). The store
+    refuses such writes by default; pass `allow_island=True` to the store
+    constructor (CLI `--allow-island`) to override after seeing the warning.
+    """
+
+    def __init__(self, scope: str, store_scope_kind: str, db_path: Path) -> None:
+        msg = (
+            f"refusing to write scope={scope!r} to a {store_scope_kind!r} "
+            f"store at {db_path} — this would create an island "
+            f"(a cross-project memory in a project-local DB). "
+            f"Set CONTINUITY_WORKSPACE/--workspace to point at a shared "
+            f"store, or pass --allow-island / allow_island=True to confirm."
+        )
+        super().__init__(msg)
+        self.scope = scope
+        self.store_scope_kind = store_scope_kind
+        self.db_path = db_path
+
+
+# Scope prefixes/values that signal cross-project intent. A write at these
+# scopes against a project-local store is the islands bug.
+_CROSS_PROJECT_SCOPE_EXACT = frozenset({"global", "workspace"})
+_CROSS_PROJECT_SCOPE_PREFIXES = ("workspace:",)
+
+
+def _is_cross_project_scope(scope: str) -> bool:
+    if scope in _CROSS_PROJECT_SCOPE_EXACT:
+        return True
+    return any(scope.startswith(p) for p in _CROSS_PROJECT_SCOPE_PREFIXES)
+
+
 class SQLiteStore:
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        policy: MemoryPolicy | None = None,
+        allow_island: bool = False,
+    ) -> None:
         self.db_path = Path(db_path)
+        # Default policy is intentionally light — Governor or a downstream
+        # caller plugs in a stricter policy by passing one in.
+        self.policy = policy if policy is not None else MemoryPolicy()
+        # When True, cross-project-shaped scopes (global / workspace*) may
+        # be written even to a project-local DB. Operators set this after
+        # seeing the topology warning. Default False per
+        # docs/gaps/ISLANDS_OF_CONTINUITY.md invariant 3.
+        self.allow_island = allow_island
 
     def initialize(
         self,
@@ -158,6 +260,15 @@ class SQLiteStore:
         if "schema_version" not in existing:
             conn.execute(
                 "ALTER TABLE store_metadata ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
+            )
+
+        links_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(memory_links)").fetchall()
+        }
+        if "pinned_content_hash" not in links_cols:
+            conn.execute(
+                "ALTER TABLE memory_links ADD COLUMN pinned_content_hash TEXT NULL"
             )
 
     def _ensure_store_metadata(
@@ -241,7 +352,7 @@ class SQLiteStore:
 
         # Parse out the CREATE TABLE statements we want to patch.
         # We only patch tables whose CHECK constraints we extend over time.
-        targets = ("memory_objects", "memory_links")
+        targets = ("memory_objects", "memory_links", "receipts")
         new_defs: dict[str, str] = {}
         for table in targets:
             stmt = _extract_create_table(schema_sql, table)
@@ -251,7 +362,12 @@ class SQLiteStore:
                 )
             new_defs[table] = stmt
 
+        # Triggers that the current schema no longer creates but older
+        # databases may still carry. Dropping is idempotent.
+        triggers_to_drop = ("trg_memory_objects_updated_at",)
+
         changed: list[str] = []
+        dropped_triggers: list[str] = []
         with self._connect() as conn:
             for table, new_sql in new_defs.items():
                 row = conn.execute(
@@ -272,10 +388,23 @@ class SQLiteStore:
                 conn.execute("PRAGMA writable_schema = OFF")
                 changed.append(table)
 
+            for trig in triggers_to_drop:
+                row = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                    (trig,),
+                ).fetchone()
+                if row is not None:
+                    conn.execute(f"DROP TRIGGER IF EXISTS {trig}")
+                    dropped_triggers.append(trig)
+
             # Verify integrity after patching.
             integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
 
-        return {"changed_tables": changed, "integrity_check": integrity}
+        return {
+            "changed_tables": changed,
+            "dropped_triggers": dropped_triggers,
+            "integrity_check": integrity,
+        }
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -350,7 +479,17 @@ class SQLiteStore:
                 return None
             return self._row_to_memory_object(row)
 
-    def query_memory(self, req: QueryMemoryRequest) -> QueryMemoryResponse:
+    def query_memory(
+        self,
+        req: QueryMemoryRequest,
+        *,
+        evaluation_time: datetime | None = None,
+    ) -> QueryMemoryResponse:
+        # Boundary default: resolve evaluation_time once at the entry; flow
+        # explicitly into the expiration filter. The kernel does not call
+        # the clock (see docs/gaps/CONTINUITY_TIME_DISCIPLINE.md).
+        if evaluation_time is None:
+            evaluation_time = utcnow()
         where: list[str] = []
         params: list[Any] = []
 
@@ -373,7 +512,7 @@ class SQLiteStore:
             where.append(
                 "(expires_at IS NULL OR expires_at > ?)"
             )
-            params.append(isoformat_now())
+            params.append(to_isoformat(evaluation_time))
 
         where_sql = ""
         if where:
@@ -399,7 +538,12 @@ class SQLiteStore:
             total=total,
         )
 
-    def get_case(self, req: GetCaseRequest) -> CaseBundle:
+    def get_case(
+        self,
+        req: GetCaseRequest,
+        *,
+        evaluation_time: datetime | None = None,
+    ) -> CaseBundle:
         """Return a derived case bundle for a scope.
 
         Cases are not persisted; they are computed on demand by bucketing
@@ -407,12 +551,14 @@ class SQLiteStore:
         state. Revoked items are included so the case preserves the
         ruled-out branches that were part of the investigation.
         """
+        if evaluation_time is None:
+            evaluation_time = utcnow()
         with self._connect() as conn:
             params: list[Any] = [req.scope]
             sql = "SELECT * FROM memory_objects WHERE scope = ?"
             if not req.include_expired:
                 sql += " AND (expires_at IS NULL OR expires_at > ?)"
-                params.append(isoformat_now())
+                params.append(to_isoformat(evaluation_time))
             sql += " ORDER BY created_at ASC, memory_id ASC"
 
             rows = conn.execute(sql, params).fetchall()
@@ -420,7 +566,9 @@ class SQLiteStore:
 
             items: list[CaseItem] = []
             for m in memories:
-                rely_ok, rely_reason = self._compute_rely_state(conn, m)
+                rely_ok, rely_reason = self._compute_rely_state(
+                    conn, m, evaluation_time,
+                )
                 items.append(CaseItem(
                     memory=m, rely_ok=rely_ok, rely_reason=rely_reason,
                 ))
@@ -468,7 +616,14 @@ class SQLiteStore:
 
         return bundle
 
-    def explain_memory(self, memory_id: str) -> ExplainMemoryResponse:
+    def explain_memory(
+        self,
+        memory_id: str,
+        *,
+        evaluation_time: datetime | None = None,
+    ) -> ExplainMemoryResponse:
+        if evaluation_time is None:
+            evaluation_time = utcnow()
         with self._connect() as conn:
             memory = self._get_memory(conn, memory_id)
 
@@ -496,7 +651,12 @@ class SQLiteStore:
 
             premises = self._load_premises(conn, memory_id)
             dependents = self._load_dependents(conn, memory_id)
-            rely_ok, rely_reason = self._compute_rely_state(conn, memory)
+            rely_ok, rely_reason = self._compute_rely_state(
+                conn, memory, evaluation_time,
+            )
+            imported = self._imported_premise_statuses(
+                conn, premises, evaluation_time,
+            )
 
         return ExplainMemoryResponse(
             memory=memory,
@@ -506,7 +666,82 @@ class SQLiteStore:
             dependents=dependents,
             rely_ok=rely_ok,
             rely_reason=rely_reason,
+            evaluation_time=evaluation_time,
+            imported_premises=imported,
         )
+
+    def _imported_premise_statuses(
+        self,
+        conn: sqlite3.Connection,
+        premises: list[MemoryLink],
+        evaluation_time: datetime,
+    ) -> list[ImportedPremiseStatus]:
+        """Compute per-premise drift for premises targeting imported memories.
+
+        Local-only: no network call to source store. Drift surfaces against
+        the pin recorded at reliance time vs. the current local content_hash.
+        State reflects the local imported memory's current status (and
+        expiration at evaluation_time).
+        """
+        out: list[ImportedPremiseStatus] = []
+        for link in premises:
+            if link.src_memory_id is None:
+                continue
+            src = self._maybe_get_memory(conn, link.src_memory_id)
+            if src is None:
+                # FK should prevent this; defensive skip if it happens.
+                continue
+            # Only annotate premises whose target is an imported memory
+            # OR whose link carries a pin (operator opted into pinning).
+            if str(src.basis) != "import" and link.pinned_content_hash is None:
+                continue
+
+            current_hash = content_hash(src)
+            if link.pinned_content_hash is None:
+                content_status = "unpinned"
+            elif link.pinned_content_hash == current_hash:
+                content_status = "match"
+            else:
+                content_status = "drift"
+
+            # State: committed/observed/revoked, plus expired if past
+            # evaluation_time. Expired takes precedence over committed.
+            state = str(src.status)
+            if (
+                state == "committed"
+                and src.expires_at is not None
+            ):
+                eval_iso = to_isoformat(evaluation_time)
+                exp_iso = to_isoformat(src.expires_at)
+                if exp_iso and eval_iso and eval_iso >= exp_iso:
+                    state = "expired"
+
+            # Provenance: the import receipt for this memory (most recent
+            # import event). Best-effort — passthrough only.
+            import_event = self._latest_event_for_memory(
+                conn, src.memory_id, EventType.IMPORT,
+            )
+            source_store_id: str | None = None
+            imported_at: datetime | None = None
+            if import_event is not None:
+                try:
+                    receipt = self._get_receipt(conn, import_event.receipt_id)
+                    source_store_id = receipt.content.get("source_store_id")
+                    imported_at = receipt.created_at
+                except RuntimeError:
+                    pass
+
+            out.append(ImportedPremiseStatus(
+                link_id=link.link_id,
+                src_memory_id=src.memory_id,
+                pinned_content_hash=link.pinned_content_hash,
+                current_content_hash=current_hash,
+                content_status=content_status,
+                state=state,
+                source_store_id=source_store_id,
+                imported_at=imported_at,
+            ))
+        return out
 
     # ------------------------------------------------------------------
     # Public write API
@@ -524,6 +759,19 @@ class SQLiteStore:
                     return ObserveMemoryResponse(
                         memory=mem, event=evt, receipt=rcpt, links=links,
                     )
+
+            self._check_island_safety(conn, req.scope)
+
+            decision = self.policy.allow_observe(req)
+            if not decision.allowed:
+                self._emit_refusal_and_raise(
+                    conn,
+                    intended_event=EventType.OBSERVE,
+                    decision=decision,
+                    request_payload=req.model_dump(mode="json"),
+                    actor=req.actor,
+                    standing=req.standing,
+                )
 
             memory = MemoryObject(
                 scope=req.scope,
@@ -586,6 +834,17 @@ class SQLiteStore:
                     return CommitMemoryResponse(
                         memory=mem, event=evt, receipt=rcpt, links=links,
                     )
+
+            decision = self.policy.allow_commit(req)
+            if not decision.allowed:
+                self._emit_refusal_and_raise(
+                    conn,
+                    intended_event=EventType.COMMIT,
+                    decision=decision,
+                    request_payload=req.model_dump(mode="json"),
+                    actor=req.approved_by,
+                    standing=req.standing,
+                )
 
             memory = self._get_memory(conn, req.memory_id)
 
@@ -661,6 +920,106 @@ class SQLiteStore:
                 memory=memory, event=event, receipt=receipt, links=links,
             )
 
+    def repair_memory(self, req: RepairMemoryRequest) -> RepairMemoryResponse:
+        """Apply a narrow patch to a memory's recorded content/metadata.
+
+        Repair is intentionally restricted (see RepairMemoryRequest doc):
+        only `content`, `source_refs`, and `confidence` may be patched.
+        Fields that affect rely semantics use observe/commit/revoke/supersede.
+
+        The repair leaves a memory.repair event and a hash-chained receipt
+        carrying the patch payload, the prior values of patched fields, and
+        the operator's reason. Status, reliance_class, expiration, and
+        premises are untouched — downstream rely_ok is preserved.
+        """
+        with self._tx() as conn:
+            if req.idempotency_key:
+                existing = self._load_idempotent_response(
+                    conn, req.idempotency_key, EventType.REPAIR,
+                )
+                if existing is not None:
+                    mem, evt, rcpt = existing
+                    return RepairMemoryResponse(
+                        memory=mem, event=evt, receipt=rcpt,
+                    )
+
+            decision = self.policy.allow_repair(req)
+            if not decision.allowed:
+                self._emit_refusal_and_raise(
+                    conn,
+                    intended_event=EventType.REPAIR,
+                    decision=decision,
+                    request_payload=req.model_dump(mode="json"),
+                    actor=req.actor,
+                    standing=req.standing,
+                )
+
+            memory = self._get_memory(conn, req.memory_id)
+
+            if memory.status == MemoryStatus.REVOKED:
+                raise InvalidTransitionError(
+                    f"cannot repair revoked memory {memory.memory_id}"
+                )
+
+            # Capture prior values for the patched fields so the receipt
+            # records what changed, not just what was newly set.
+            prior: dict[str, Any] = {}
+            if "content" in req.patch:
+                prior["content"] = memory.content
+                memory.content = req.patch["content"]
+            if "source_refs" in req.patch:
+                prior["source_refs"] = [
+                    s.model_dump(mode="json") for s in memory.source_refs
+                ]
+                memory.source_refs = [
+                    SourceRef.model_validate(s) for s in req.patch["source_refs"]
+                ]
+            if "confidence" in req.patch:
+                prior["confidence"] = memory.confidence
+                memory.confidence = float(req.patch["confidence"])
+
+            receipt_content = {
+                "memory_id": memory.memory_id,
+                "reason": req.reason,
+                "patch": req.patch,
+                "prior": prior,
+                "target_event_id": req.target_event_id,
+                "target_receipt_id": req.target_receipt_id,
+                "actor": (
+                    req.actor.model_dump(mode="json") if req.actor else None
+                ),
+                "standing": (
+                    req.standing.model_dump(mode="json")
+                    if req.standing else None
+                ),
+            }
+
+            receipt = self._build_receipt(
+                conn, ReceiptType.MEMORY_REPAIR, receipt_content,
+            )
+
+            event = MemoryEvent(
+                memory_id=memory.memory_id,
+                event_type=EventType.REPAIR,
+                actor=req.actor,
+                standing=req.standing,
+                receipt_id=receipt.receipt_id,
+                payload={
+                    "reason": req.reason,
+                    "patch": req.patch,
+                    "prior": prior,
+                },
+                idempotency_key=req.idempotency_key,
+            )
+
+            self._update_memory_object(conn, memory)
+            self._insert_receipt(conn, receipt)
+            self._insert_memory_event(conn, event)
+
+            return RepairMemoryResponse(
+                memory=memory, event=event, receipt=receipt,
+            )
+
     def revoke_memory(self, req: RevokeMemoryRequest) -> RevokeMemoryResponse:
         with self._tx() as conn:
             if req.idempotency_key:
@@ -727,6 +1086,181 @@ class SQLiteStore:
                 memory=memory, event=event, receipt=receipt,
             )
 
+    def import_memory(self, req: ImportMemoryRequest) -> ImportMemoryResponse:
+        """Pull a memory from a source store into the local store.
+
+        Verifies `expected_content_hash` against the recomputed hash over
+        the supplied portable payload (`memory_id`, scope, kind, content,
+        reliance_class, supersedes). Refuses on mismatch.
+
+        Idempotency: if the memory already exists locally at the same
+        content_hash, returns the existing row + the original import
+        receipt and event; no new audit artifact is emitted (already_imported=True).
+        If the memory exists at a *different* content_hash, raises
+        ContentHashMismatchError — V1 does not silently overwrite or fork.
+        See docs/gaps/CROSS_SCOPE_REFERENCE_GAP.md invariants 4-6 and
+        explicit deferrals.
+
+        Writes:
+          - memory_objects row (if first-time import)
+          - memory_events row of type 'import'
+          - receipts row of type 'memory.import'
+          - spool_imports row marking the import as 'applied'
+        """
+        # Build the candidate memory object from the portable payload.
+        # basis is forced to IMPORT for imported memories — the basis on
+        # the source store may differ, but locally this is an import.
+        candidate = MemoryObject(
+            memory_id=req.memory_id,
+            scope=req.scope,
+            kind=req.kind,
+            basis=Basis.IMPORT,
+            status=req.status,
+            reliance_class=req.reliance_class,
+            confidence=req.confidence,
+            content=req.content,
+            source_refs=req.source_refs,
+            expires_at=req.expires_at,
+            supersedes=req.supersedes,
+            created_by=req.actor,
+        )
+        # IMPORTANT: content_hash is computed over the portable subset
+        # which uses memory.basis only implicitly (it's not in the hash).
+        # We use a temporary copy with the source's reliance/scope/etc to
+        # produce the canonical hash, then verify against expected.
+        actual_hash = content_hash(candidate)
+        if actual_hash != req.expected_content_hash:
+            raise ContentHashMismatchError(
+                memory_id=req.memory_id,
+                expected=req.expected_content_hash,
+                actual=actual_hash,
+                reason="payload hash differs from expected_content_hash",
+            )
+
+        with self._tx() as conn:
+            # Idempotency by explicit key — short-circuit identical replays.
+            if req.idempotency_key:
+                existing = self._load_idempotent_response(
+                    conn, req.idempotency_key, EventType.IMPORT,
+                )
+                if existing is not None:
+                    mem, evt, rcpt = existing
+                    spool_id = self._latest_spool_id_for_memory(
+                        conn, mem.memory_id, req.source_store_id,
+                    )
+                    return ImportMemoryResponse(
+                        memory=mem, event=evt, receipt=rcpt,
+                        spool_import_id=spool_id or "",
+                        already_imported=True,
+                    )
+
+            # Idempotency by (memory_id, content_hash) — second import of
+            # the same memory at the same version is a no-op.
+            existing_local = self._maybe_get_memory(conn, req.memory_id)
+            if existing_local is not None:
+                existing_hash = content_hash(existing_local)
+                if existing_hash != actual_hash:
+                    raise ContentHashMismatchError(
+                        memory_id=req.memory_id,
+                        expected=actual_hash,
+                        actual=existing_hash,
+                        reason=(
+                            "memory already exists locally at a different "
+                            "content_hash; V1 refuses silent overwrite. "
+                            "Revoke + re-import, or import a supersede "
+                            "successor under a new memory_id."
+                        ),
+                    )
+                # Same content — return the prior import event/receipt as
+                # the idempotent response.
+                prior_event = self._latest_event_for_memory(
+                    conn, req.memory_id, EventType.IMPORT,
+                )
+                if prior_event is not None:
+                    prior_receipt = self._get_receipt(conn, prior_event.receipt_id)
+                    spool_id = self._latest_spool_id_for_memory(
+                        conn, req.memory_id, req.source_store_id,
+                    )
+                    return ImportMemoryResponse(
+                        memory=existing_local,
+                        event=prior_event,
+                        receipt=prior_receipt,
+                        spool_import_id=spool_id or "",
+                        already_imported=True,
+                    )
+                # Exists but never imported (locally-authored row at the
+                # same memory_id — defensive refusal: don't smuggle it
+                # into the import audit trail).
+                raise ContentHashMismatchError(
+                    memory_id=req.memory_id,
+                    expected=actual_hash,
+                    actual=existing_hash,
+                    reason=(
+                        "memory_id already exists locally but was not "
+                        "imported; refusing to retroactively label a "
+                        "locally-authored memory as imported."
+                    ),
+                )
+
+            # Island check: imports of cross-project-shaped scopes follow
+            # the same topology rules as observe.
+            self._check_island_safety(conn, req.scope)
+
+            # Build the import receipt and event, then insert atomically.
+            spool_id = new_id("imp")
+            receipt_content = {
+                "memory_id": candidate.memory_id,
+                "source_store_id": req.source_store_id,
+                "source_ref": req.source_ref,
+                "imported_content_hash": actual_hash,
+                "scope": candidate.scope,
+                "kind": str(candidate.kind),
+                "actor": (
+                    req.actor.model_dump(mode="json") if req.actor else None
+                ),
+                "standing": (
+                    req.standing.model_dump(mode="json")
+                    if req.standing else None
+                ),
+            }
+            receipt = self._build_receipt(
+                conn, ReceiptType.MEMORY_IMPORT, receipt_content,
+            )
+
+            event = MemoryEvent(
+                memory_id=candidate.memory_id,
+                event_type=EventType.IMPORT,
+                actor=req.actor,
+                standing=req.standing,
+                receipt_id=receipt.receipt_id,
+                payload={
+                    "source_store_id": req.source_store_id,
+                    "source_ref": req.source_ref,
+                    "imported_content_hash": actual_hash,
+                    "spool_import_id": spool_id,
+                },
+                idempotency_key=req.idempotency_key,
+            )
+
+            self._insert_memory_object(conn, candidate)
+            self._insert_receipt(conn, receipt)
+            self._insert_memory_event(conn, event)
+            self._insert_spool_import(
+                conn,
+                spool_id=spool_id,
+                source=req.source_store_id,
+                external_ref=req.source_ref or candidate.memory_id,
+                status="applied",
+            )
+
+            return ImportMemoryResponse(
+                memory=candidate,
+                event=event,
+                receipt=receipt,
+                spool_import_id=spool_id,
+                already_imported=False,
+            )
+
     # ------------------------------------------------------------------
     # Memory links
     # ------------------------------------------------------------------
@@ -750,6 +1284,7 @@ class SQLiteStore:
                 strength=premise.strength,
                 status=LinkStatus.ACTIVE,
                 note=premise.note,
+                pinned_content_hash=premise.pinned_content_hash,
                 created_by_event_id=created_by_event_id,
             )
             conn.execute(
@@ -759,8 +1294,9 @@ class SQLiteStore:
                     src_memory_id, src_receipt_id, src_ref_json,
                     relation, strength, status, note,
                     created_at, created_by_event_id,
-                    revoked_at, revoked_by_event_id
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    revoked_at, revoked_by_event_id,
+                    pinned_content_hash
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     link.link_id,
@@ -776,6 +1312,7 @@ class SQLiteStore:
                     link.created_by_event_id,
                     to_isoformat(link.revoked_at),
                     link.revoked_by_event_id,
+                    link.pinned_content_hash,
                 ),
             )
             links.append(link)
@@ -817,14 +1354,19 @@ class SQLiteStore:
         self,
         conn: sqlite3.Connection,
         memory: MemoryObject,
+        evaluation_time: datetime,
     ) -> tuple[bool, str]:
+        # evaluation_time is required — the kernel never reads the wall clock.
+        # The boundary (explain/query/case) resolves the default via utcnow()
+        # exactly once and flows it down explicitly so historical rely is
+        # reconstructible (per docs/gaps/CONTINUITY_TIME_DISCIPLINE.md).
         if memory.status != MemoryStatus.COMMITTED:
             return False, f"memory status is {memory.status}, not committed"
 
         if memory.expires_at is not None:
-            now = isoformat_now()
-            exp = to_isoformat(memory.expires_at)
-            if exp and now >= exp:
+            eval_iso = to_isoformat(evaluation_time)
+            exp_iso = to_isoformat(memory.expires_at)
+            if exp_iso and eval_iso and eval_iso >= exp_iso:
                 return False, "memory is expired"
 
         if memory.reliance_class == RelianceClass.NONE:
@@ -882,6 +1424,84 @@ class SQLiteStore:
         if row is None:
             raise MemoryNotFoundError(memory_id)
         return self._row_to_memory_object(row)
+
+    def _maybe_get_memory(
+        self, conn: sqlite3.Connection, memory_id: str,
+    ) -> MemoryObject | None:
+        row = conn.execute(
+            "SELECT * FROM memory_objects WHERE memory_id = ?",
+            (memory_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_memory_object(row)
+
+    def _latest_event_for_memory(
+        self,
+        conn: sqlite3.Connection,
+        memory_id: str,
+        event_type: EventType,
+    ) -> MemoryEvent | None:
+        row = conn.execute(
+            "SELECT * FROM memory_events "
+            "WHERE memory_id = ? AND event_type = ? "
+            "ORDER BY created_at DESC, event_id DESC LIMIT 1",
+            (memory_id, str(event_type)),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_memory_event(row)
+
+    def _get_receipt(
+        self, conn: sqlite3.Connection, receipt_id: str,
+    ) -> ReceiptRecord:
+        row = conn.execute(
+            "SELECT * FROM receipts WHERE receipt_id = ?",
+            (receipt_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"receipt {receipt_id} not found")
+        return self._row_to_receipt(row)
+
+    def _latest_spool_id_for_memory(
+        self,
+        conn: sqlite3.Connection,
+        memory_id: str,
+        source_store_id: str,
+    ) -> str | None:
+        """Find the most recent spool_import row for (source, memory_id)."""
+        row = conn.execute(
+            "SELECT import_id FROM spool_imports "
+            "WHERE source = ? AND external_ref = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (source_store_id, memory_id),
+        ).fetchone()
+        return row["import_id"] if row else None
+
+    def _insert_spool_import(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        spool_id: str,
+        source: str,
+        external_ref: str,
+        status: str,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO spool_imports "
+            "(import_id, source, external_ref, status, reason, "
+            " created_at, applied_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                spool_id,
+                source,
+                external_ref,
+                status,
+                None,
+                isoformat_now(),
+                isoformat_now() if status == "applied" else None,
+            ),
+        )
 
     def _insert_memory_object(self, conn: sqlite3.Connection, m: MemoryObject) -> None:
         conn.execute(
@@ -970,6 +1590,69 @@ class SQLiteStore:
                     f"idempotency conflict for key {e.idempotency_key}"
                 ) from exc
             raise
+
+    def _check_island_safety(
+        self,
+        conn: sqlite3.Connection,
+        scope: str,
+    ) -> None:
+        """Refuse cross-project-shaped writes against project-local stores.
+
+        Implements docs/gaps/ISLANDS_OF_CONTINUITY.md invariant 3: a
+        scope=global / scope=workspace[:*] memory in a project-local DB is
+        "a local memory wearing a fake mustache" — the storage topology
+        contradicts the advertised scope. Refuse unless the operator passes
+        allow_island=True (CLI --allow-island).
+
+        Stores stamped scope_kind="workspace" / "global" / "explicit" are
+        operator-chosen and not silent fallback, so they are allowed.
+        """
+        if self.allow_island:
+            return
+        if not _is_cross_project_scope(scope):
+            return
+        row = conn.execute(
+            "SELECT scope_kind FROM store_metadata WHERE id = 1"
+        ).fetchone()
+        store_kind = row["scope_kind"] if row else None
+        if store_kind == "project":
+            raise IslandWriteRefusedError(scope, store_kind, self.db_path)
+
+    def _emit_refusal_and_raise(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        intended_event: EventType,
+        decision: PolicyResult,
+        request_payload: dict[str, Any],
+        actor: ActorRef | None,
+        standing: StandingRef | None,
+    ) -> None:
+        """Append a hash-chained memory.refused receipt and raise.
+
+        No memory_objects row is created, no memory_events row is written.
+        The receipt is the only audit artifact of the denied write — it
+        chains off the latest receipt so denied writes are visible in the
+        chain (per docs/gaps/CROSS_COMPONENT_RELIANCE_GAP.md, plan 0.3).
+        """
+        evaluation_time = utcnow()
+        content = {
+            "intended_event": str(intended_event),
+            "policy_reason": decision.reason,
+            "request_hash": request_hash(request_payload),
+            "evaluation_time": to_isoformat(evaluation_time),
+            "actor": actor.model_dump(mode="json") if actor else None,
+            "standing": standing.model_dump(mode="json") if standing else None,
+        }
+        refusal = self._build_receipt(
+            conn, ReceiptType.MEMORY_REFUSED, content,
+        )
+        self._insert_receipt(conn, refusal)
+        # Persist the refusal before raising — otherwise the _tx() context
+        # manager would roll it back with the exception. This is the whole
+        # point of the receipt: denied writes are auditable.
+        conn.commit()
+        raise PolicyDeniedError(decision.reason, refusal)
 
     def _build_receipt(
         self,
@@ -1095,6 +1778,10 @@ class SQLiteStore:
 
     def _row_to_memory_link(self, row: sqlite3.Row) -> MemoryLink:
         src_ref_raw = from_json(row["src_ref_json"])
+        # pinned_content_hash may be absent on rows pre-dating the column;
+        # PRAGMA table_info-driven migration adds it, but Row.keys() guards
+        # against pre-migration reads.
+        pinned = row["pinned_content_hash"] if "pinned_content_hash" in row.keys() else None
         return MemoryLink(
             link_id=row["link_id"],
             dst_memory_id=row["dst_memory_id"],
@@ -1109,4 +1796,5 @@ class SQLiteStore:
             created_by_event_id=row["created_by_event_id"],
             revoked_at=row["revoked_at"],
             revoked_by_event_id=row["revoked_by_event_id"],
+            pinned_content_hash=pinned,
         )

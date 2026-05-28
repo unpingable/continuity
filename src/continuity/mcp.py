@@ -33,11 +33,16 @@ logging.basicConfig(
 )
 log = logging.getLogger("continuity.mcp")
 
+from datetime import datetime, timezone
+
 from continuity.api.models import (
     ActorRef,
+    Basis,
     CommitMemoryRequest,
     GetCaseRequest,
+    ImportMemoryRequest,
     MemoryKind,
+    RepairMemoryRequest,
     MemoryStatus,
     ObserveMemoryRequest,
     PremiseRef,
@@ -47,8 +52,11 @@ from continuity.api.models import (
     SourceRef,
 )
 from continuity.store.sqlite import (
+    ContentHashMismatchError,
     InvalidTransitionError,
+    IslandWriteRefusedError,
     MemoryNotFoundError,
+    PolicyDeniedError,
     SQLiteStore,
 )
 from continuity.util.dbpath import (
@@ -236,6 +244,109 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "memory_import",
+        "description": (
+            "Import a memory from a source store into the local store, "
+            "with content-hash verification. The caller supplies the "
+            "portable payload (memory_id, scope, kind, content, "
+            "reliance_class, supersedes) plus the expected sha256 "
+            "content_hash; the store recomputes and refuses on mismatch. "
+            "Idempotent at the same content_hash. See "
+            "docs/gaps/CROSS_SCOPE_REFERENCE_GAP.md."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_store_id": {
+                    "type": "string",
+                    "description": "store_id of the source continuity DB.",
+                },
+                "source_ref": {
+                    "type": "string",
+                    "description": "Optional human-readable source pointer (e.g., a path).",
+                },
+                "memory_id": {
+                    "type": "string",
+                    "description": "memory_id in the source store (also used locally).",
+                },
+                "scope": {"type": "string"},
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "fact", "note", "decision", "hypothesis",
+                        "summary", "constraint", "project_state",
+                        "next_action", "experiment", "lesson",
+                    ],
+                },
+                "content": {"type": "object"},
+                "reliance_class": {
+                    "type": "string",
+                    "enum": ["none", "retrieve_only", "advisory", "actionable"],
+                },
+                "supersedes": {"type": "string"},
+                "expected_content_hash": {
+                    "type": "string",
+                    "description": "sha256:... hash the caller asserts.",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["observed", "committed", "revoked"],
+                    "description": "Status to land at locally. Default 'committed'.",
+                },
+            },
+            "required": [
+                "source_store_id", "memory_id", "scope", "kind",
+                "content", "expected_content_hash",
+            ],
+        },
+    },
+    {
+        "name": "memory_repair",
+        "description": (
+            "Repair a recording error in an existing memory. Repair is "
+            "intentionally narrow: only `content`, `source_refs`, and "
+            "`confidence` may be patched. Fields that affect rely "
+            "semantics (scope/kind/basis/status/reliance_class, "
+            "expiration, supersession, premises) cannot be repaired — "
+            "use the supersede pattern for scope/kind/reliance changes, "
+            "or revoke+recommit for status/basis changes. The repair "
+            "leaves a memory.repair event and a hash-chained receipt."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory_id": {
+                    "type": "string",
+                    "description": "ID of the memory to repair.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why this repair is being applied.",
+                },
+                "patch": {
+                    "type": "object",
+                    "description": (
+                        "Patch dict. May only contain keys: content, "
+                        "source_refs, confidence. Other keys are rejected."
+                    ),
+                },
+                "target_event_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional: the event_id this repair corrects."
+                    ),
+                },
+                "target_receipt_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional: the receipt_id this repair corrects."
+                    ),
+                },
+            },
+            "required": ["memory_id", "reason", "patch"],
+        },
+    },
+    {
         "name": "memory_query",
         "description": (
             "Query memories by scope, kind, status, basis, or reliance class. "
@@ -307,7 +418,10 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Explain a memory: its full event lineage, receipt chain, premises, "
             "dependents, and whether it is safe to rely on (rely_ok). Use this "
-            "before acting on a remembered fact to verify it is still valid."
+            "before acting on a remembered fact to verify it is still valid. "
+            "Optionally takes evaluation_time (ISO-8601) to reconstruct rely_ok "
+            "as it would have been computed at that historical moment — useful "
+            "for audit replay. Defaults to the current wall clock."
         ),
         "inputSchema": {
             "type": "object",
@@ -315,6 +429,15 @@ TOOLS: list[dict[str, Any]] = [
                 "memory_id": {
                     "type": "string",
                     "description": "The memory ID to explain.",
+                },
+                "evaluation_time": {
+                    "type": "string",
+                    "description": (
+                        "Optional ISO-8601 timestamp. When provided, rely_ok "
+                        "and expiration are computed as of that moment, not "
+                        "the current wall clock. Reflected back in the "
+                        "response's evaluation_time field."
+                    ),
                 },
             },
             "required": ["memory_id"],
@@ -404,6 +527,26 @@ _DEFAULT_PRINCIPAL_ID = "claude:mcp"
 _PRINCIPAL_ENV_VAR = "CONTINUITY_PRINCIPAL_ID"
 
 
+def _parse_evaluation_time(value: Any) -> datetime | None:
+    """Parse an ISO-8601 string into a timezone-aware datetime, or None.
+
+    Accepts None passthrough; rejects empty strings to keep handler args
+    honest. The bare 'Z' suffix common in JSON timestamps is normalized to
+    +00:00 because fromisoformat in Python <3.11 rejects it.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("evaluation_time must be a non-empty ISO-8601 string")
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def _mcp_actor() -> ActorRef:
     """Build the actor that authored the current MCP call.
 
@@ -423,6 +566,7 @@ class ContinuityMCPServer:
         *,
         scope_kind: str | None = None,
         scope_label: str | None = None,
+        allow_island: bool = False,
     ) -> None:
         if db_path is None:
             db_path, source = resolve_db_path()
@@ -431,13 +575,16 @@ class ContinuityMCPServer:
         self.db_path = db_path
         self.scope_kind = scope_kind
         self.scope_label = scope_label
+        self.allow_island = allow_island
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._store: SQLiteStore | None = None
 
     @property
     def store(self) -> SQLiteStore:
         if self._store is None:
-            self._store = SQLiteStore(self.db_path)
+            self._store = SQLiteStore(
+                self.db_path, allow_island=self.allow_island,
+            )
             self._store.initialize(
                 scope_kind=self.scope_kind,
                 scope_label=self.scope_label,
@@ -457,6 +604,32 @@ class ContinuityMCPServer:
             return {"error": f"memory not found: {exc}"}
         except InvalidTransitionError as exc:
             return {"error": f"invalid transition: {exc}"}
+        except PolicyDeniedError as exc:
+            # Refusal receipt has already been appended; surface its ID so
+            # the caller can fetch the audit artifact.
+            return {
+                "error": f"policy denied: {exc.reason}",
+                "refused": True,
+                "refusal_receipt_id": exc.refusal_receipt.receipt_id,
+                "refusal_receipt_hash": exc.refusal_receipt.hash,
+            }
+        except IslandWriteRefusedError as exc:
+            return {
+                "error": str(exc),
+                "refused": True,
+                "reason": "island_write_refused",
+                "scope": exc.scope,
+                "store_scope_kind": exc.store_scope_kind,
+            }
+        except ContentHashMismatchError as exc:
+            return {
+                "error": str(exc),
+                "refused": True,
+                "reason": "content_hash_mismatch",
+                "memory_id": exc.memory_id,
+                "expected": exc.expected,
+                "actual": exc.actual,
+            }
         except Exception as exc:
             return {"error": str(exc)}
 
@@ -539,6 +712,53 @@ class ContinuityMCPServer:
             "receipt_id": resp.receipt.receipt_id,
         }
 
+    def _handle_memory_import(self, args: dict[str, Any]) -> dict[str, Any]:
+        source_refs = [
+            SourceRef(**s) for s in args.get("source_refs", [])
+        ]
+        req = ImportMemoryRequest(
+            source_store_id=args["source_store_id"],
+            source_ref=args.get("source_ref"),
+            memory_id=args["memory_id"],
+            scope=args["scope"],
+            kind=args["kind"],
+            basis=args.get("basis", "import"),
+            content=args["content"],
+            reliance_class=args.get("reliance_class", "none"),
+            supersedes=args.get("supersedes"),
+            confidence=args.get("confidence", 0.5),
+            source_refs=source_refs,
+            status=args.get("status", "committed"),
+            expected_content_hash=args["expected_content_hash"],
+            actor=_mcp_actor(),
+        )
+        resp = self.store.import_memory(req)
+        return {
+            "memory_id": resp.memory.memory_id,
+            "spool_import_id": resp.spool_import_id,
+            "already_imported": resp.already_imported,
+            "event_id": resp.event.event_id,
+            "receipt_id": resp.receipt.receipt_id,
+            "receipt_hash": resp.receipt.hash,
+        }
+
+    def _handle_memory_repair(self, args: dict[str, Any]) -> dict[str, Any]:
+        req = RepairMemoryRequest(
+            memory_id=args["memory_id"],
+            reason=args["reason"],
+            patch=args.get("patch") or {},
+            target_event_id=args.get("target_event_id"),
+            target_receipt_id=args.get("target_receipt_id"),
+            actor=_mcp_actor(),
+        )
+        resp = self.store.repair_memory(req)
+        return {
+            "memory_id": resp.memory.memory_id,
+            "event_id": resp.event.event_id,
+            "receipt_id": resp.receipt.receipt_id,
+            "receipt_hash": resp.receipt.hash,
+        }
+
     def _handle_memory_query(self, args: dict[str, Any]) -> dict[str, Any]:
         req = QueryMemoryRequest(
             scope=args.get("scope"),
@@ -575,7 +795,11 @@ class ContinuityMCPServer:
         return memory.model_dump(mode="json")
 
     def _handle_memory_explain(self, args: dict[str, Any]) -> dict[str, Any]:
-        resp = self.store.explain_memory(args["memory_id"])
+        evaluation_time = _parse_evaluation_time(args.get("evaluation_time"))
+        resp = self.store.explain_memory(
+            args["memory_id"],
+            evaluation_time=evaluation_time,
+        )
         return {
             "memory": {
                 "memory_id": resp.memory.memory_id,
@@ -587,6 +811,10 @@ class ContinuityMCPServer:
             },
             "rely_ok": resp.rely_ok,
             "rely_reason": resp.rely_reason,
+            "evaluation_time": (
+                resp.evaluation_time.isoformat()
+                if resp.evaluation_time is not None else None
+            ),
             "event_count": len(resp.events),
             "premises": [
                 {
@@ -609,6 +837,21 @@ class ContinuityMCPServer:
                     "status": d.status,
                 }
                 for d in resp.dependents
+            ],
+            "imported_premises": [
+                {
+                    "link_id": ip.link_id,
+                    "src_memory_id": ip.src_memory_id,
+                    "pinned_content_hash": ip.pinned_content_hash,
+                    "current_content_hash": ip.current_content_hash,
+                    "content_status": ip.content_status,
+                    "state": ip.state,
+                    "source_store_id": ip.source_store_id,
+                    "imported_at": (
+                        ip.imported_at.isoformat() if ip.imported_at else None
+                    ),
+                }
+                for ip in resp.imported_premises
             ],
         }
 
@@ -712,9 +955,13 @@ def create_server(
     *,
     scope_kind: str | None = None,
     scope_label: str | None = None,
+    allow_island: bool = False,
 ) -> ContinuityMCPServer:
     return ContinuityMCPServer(
-        db_path, scope_kind=scope_kind, scope_label=scope_label,
+        db_path,
+        scope_kind=scope_kind,
+        scope_label=scope_label,
+        allow_island=allow_island,
     )
 
 
@@ -723,14 +970,21 @@ def run_mcp_server(
     *,
     scope_kind: str | None = None,
     scope_label: str | None = None,
+    allow_island: bool = False,
 ) -> None:
     """Run the continuity MCP server over JSON-RPC/stdio."""
     log.info("SERVER STARTING db_path=%s pid=%d", db_path, os.getpid())
     log.info("  python=%s", sys.executable)
     log.info("  argv=%s", sys.argv)
-    log.info("  scope_kind=%s scope_label=%s", scope_kind, scope_label)
+    log.info(
+        "  scope_kind=%s scope_label=%s allow_island=%s",
+        scope_kind, scope_label, allow_island,
+    )
     server = create_server(
-        db_path, scope_kind=scope_kind, scope_label=scope_label,
+        db_path,
+        scope_kind=scope_kind,
+        scope_label=scope_label,
+        allow_island=allow_island,
     )
     log.info("SERVER READY, entering read loop")
 
@@ -836,11 +1090,30 @@ def main() -> None:
         if source == "workspace"
         else None
     )
-    log.info(
-        "DB resolved: %s (source=%s, scope_kind=%s, label=%s)",
-        db_path, source, scope_kind, scope_label,
+    allow_island = os.environ.get("CONTINUITY_ALLOW_ISLAND", "").lower() in (
+        "1", "true", "yes",
     )
-    run_mcp_server(db_path, scope_kind=scope_kind, scope_label=scope_label)
+    log.info(
+        "DB resolved: %s (source=%s, scope_kind=%s, label=%s, allow_island=%s)",
+        db_path, source, scope_kind, scope_label, allow_island,
+    )
+    # If the resolver landed in fallback territory, log it loudly so the
+    # operator can see the topology in the debug log without having to run
+    # `contctl where` afterward (docs/gaps/ISLANDS_OF_CONTINUITY.md inv. 4).
+    if source in ("git-root", "global-fallback"):
+        log.warning(
+            "TOPOLOGY: server resolved DB by '%s' fallback. "
+            "Cross-project-shaped writes (scope=global / scope=workspace*) "
+            "will refuse without allow_island. Set CONTINUITY_WORKSPACE or "
+            "use --workspace to point at a shared store.",
+            source,
+        )
+    run_mcp_server(
+        db_path,
+        scope_kind=scope_kind,
+        scope_label=scope_label,
+        allow_island=allow_island,
+    )
 
 
 if __name__ == "__main__":

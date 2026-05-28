@@ -21,6 +21,7 @@ from continuity.api.models import (
     MemoryObject,
     ObserveMemoryRequest,
     RelianceClass,
+    RepairMemoryRequest,
 )
 
 
@@ -46,12 +47,27 @@ class MemoryPolicy:
         return PolicyResult(Decision.ALLOW, "observe allowed by default")
 
     def allow_commit(self, req: CommitMemoryRequest) -> PolicyResult:
-        if req.reliance_class == RelianceClass.ACTIONABLE:
+        # ACTIONABLE requires explicit operator approval — the approved_by
+        # field is how operator approval is signaled. The rely-time check
+        # in _compute_rely_state additionally bars actionable+inference and
+        # actionable+summary regardless of approval, so this gate is the
+        # write-time half of the same restriction (matched semantics:
+        # the operator's approval gets recorded as part of the request).
+        if (
+            req.reliance_class == RelianceClass.ACTIONABLE
+            and req.approved_by is None
+        ):
             return PolicyResult(
                 Decision.DENY,
                 "actionable reliance requires explicit operator approval",
             )
         return PolicyResult(Decision.ALLOW, "commit allowed by default")
+
+    def allow_repair(self, req: RepairMemoryRequest) -> PolicyResult:
+        # Repair is metadata-and-content only — semantic restrictions are
+        # enforced at the model layer via RepairMemoryRequest.ALLOWED_PATCH_KEYS.
+        # Policy can still deny (e.g., for actor standing), but defaults allow.
+        return PolicyResult(Decision.ALLOW, "repair allowed by default")
 
     def allow_rely(
         self,

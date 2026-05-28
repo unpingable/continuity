@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS receipts (
             'memory.commit',
             'memory.revoke',
             'memory.repair',
-            'memory.import'
+            'memory.import',
+            'memory.refused'
         )
     ),
     hash          TEXT NOT NULL UNIQUE,
@@ -193,6 +194,10 @@ CREATE TABLE IF NOT EXISTS memory_links (
     revoked_by_event_id TEXT NULL
         REFERENCES memory_events(event_id) ON DELETE RESTRICT,
 
+    -- Pinned content_hash captured at reliance time for imported premises.
+    -- See docs/gaps/CROSS_SCOPE_REFERENCE_GAP.md invariant 7.
+    pinned_content_hash TEXT NULL,
+
     -- Exactly one source must be set
     CHECK (
         (CASE WHEN src_memory_id IS NOT NULL THEN 1 ELSE 0 END) +
@@ -264,15 +269,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_links_unique_active
         status
     );
 
--- Auto-update updated_at on memory_objects mutation
-CREATE TRIGGER IF NOT EXISTS trg_memory_objects_updated_at
-AFTER UPDATE ON memory_objects
-FOR EACH ROW
-WHEN NEW.updated_at = OLD.updated_at
-BEGIN
-    UPDATE memory_objects
-    SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-    WHERE memory_id = NEW.memory_id;
-END;
+-- updated_at is owned by the application (see docs/gaps/CONTINUITY_TIME_DISCIPLINE.md
+-- invariant 2 — one clock surface, not two). The previous trigger that read
+-- SQLite's ambient 'now' is intentionally absent. Existing databases that still
+-- carry the trigger have it dropped via SQLiteStore.migrate_schema.
 
 COMMIT;

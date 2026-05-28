@@ -87,13 +87,20 @@ No new tables in v1. The machinery lands on existing ones.
 
 **`PremiseRef` / `MemoryLink`:** gain an optional `pinned_content_hash` field at reliance time, capturing the exact version the reliance was bound to. If absent, reliance is unpinned (discouraged for shared-object references, allowed for local ones).
 
-**Shared-object content hash computation:** reuses `util.jsoncanon.canonical_json()` over a defined subset of the memory_object row. The exact subset is an open question (see below); the candidate is `(memory_id, scope, kind, content, reliance_class, supersedes_memory_id)` — fields whose change constitutes a new version, excluding timestamps and local-only metadata.
+**Shared-object hashing — content vs. state (amended 2026-05-28):** two distinct hashes, both via `util.jsoncanon.canonical_json()`.
+
+- **`content_hash(memory)`** — portable, stable across stores. Hashes the **committed payload only**: `(source_memory_id, scope, kind, content, reliance_class, supersedes)`. `source_memory_id` is the memory ID assigned in the originating store (per invariant 1, `memory_id` is the canonical cross-DB identity); naming it `source_memory_id` inside the hash payload makes its role explicit and prevents a future "local IDs poisoning portable hashes" mistake. `status` is **not** included — revocation is state, not content.
+- **`state_hash(memory)`** — local, captures current posture. Hashes `(content_hash, status, revoked_by)`. Used by explain to distinguish "the doctrine text changed" from "the doctrine was revoked after I cited it." Content drift and status drift are different failures; the rest of the spec depends on them not collapsing.
+
+Keeper: *content drift and status drift are different failures.*
+
+A pin records a `content_hash`. A live re-check computes `state_hash` to decide whether the cited memory is still safely usable. Mismatch between pinned content hash and current content hash is **content drift**; matching content hash but a state-hash that differs because the local row is now revoked or replaced is **state drift**. The explain output distinguishes them by name.
 
 ## V1 Slice
 
 Keep the first implementation narrow.
 
-1. **Content-hash function** over a defined memory-object subset, deterministic across DBs.
+1. **Hash functions** — `content_hash(memory)` (portable, no local IDs, no status) and `state_hash(memory)` (content_hash plus local status/revoked_by). Both deterministic across DBs for the portable half.
 2. **Import path**: a new CLI/API verb (e.g. `contctl import --from STORE --memory-id MID`) that pulls a memory from a source store, writes it locally, emits a `memory.imported` event, and produces a receipt carrying the content hash.
 3. **Pinned premises**: `PremiseRef` and `MemoryLink` accept an optional `pinned_content_hash`. When reliance targets an imported memory, pinning is strongly encouraged.
 4. **`explain()` cross-scope traversal**: when a premise points at an imported memory, `explain()` resolves it, reports pin-vs-current match/mismatch, and walks local `supersedes` edges within the imported subset.
@@ -116,7 +123,7 @@ Not v1 (listed above in the invariants section, repeated here for readability):
 
 ## Open Questions
 
-1. **What exactly goes into the content hash?** Candidate: `(memory_id, scope, kind, content, reliance_class, supersedes_memory_id)`. Does `status` belong? Probably yes for committed/revoked, but a `revoked` state of a shared object is a new version in its own right — needs thought.
+1. **What goes into each hash?** **Resolved (2026-05-28):** `content_hash = (source_memory_id, scope, kind, content, reliance_class, supersedes)`; `state_hash = (content_hash, status, revoked_by)`. `status` is explicitly OUT of `content_hash` — collapsing revocation into content drift would let revocation silently impersonate a content rewrite, which is the failure shape this gap exists to prevent. See "Data Shape" above.
 2. **How does a project discover the authoritative source for a given memory?** v1 can accept an explicit `--from STORE` and defer discovery. Later: a registry, a naming convention, or a manifest per scope.
 3. **Should the `supersedes` link for shared objects be imported eagerly (pull the whole chain) or lazily (walk on demand)?** Probably lazy with explicit prefetch; decide when implementing.
 4. **What happens when an imported memory's source store is unavailable at explain time?** Fall back to the local pinned copy, flag the unreachability as a gap, never pretend the pin is "current-verified."

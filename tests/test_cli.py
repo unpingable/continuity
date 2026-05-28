@@ -203,7 +203,11 @@ def test_case_command_human(db_path: str) -> None:
         "--basis", "direct_capture",
         "--content", '{"text": "demo finding"}',
     ])["memory_id"]
-    run(db_path, ["commit", fact_id, "--reliance-class", "actionable"])
+    run(db_path, [
+        "commit", fact_id,
+        "--reliance-class", "actionable",
+        "--actor", "operator:test",
+    ])
 
     run(db_path, [
         "observe",

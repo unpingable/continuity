@@ -1,6 +1,7 @@
 """Tests for the derived case bundle endpoint."""
 
 from continuity.api.models import (
+    ActorRef,
     Basis,
     CommitMemoryRequest,
     GetCaseRequest,
@@ -12,6 +13,10 @@ from continuity.api.models import (
     RevokeMemoryRequest,
 )
 from continuity.store.sqlite import SQLiteStore
+
+
+def _operator() -> ActorRef:
+    return ActorRef(principal_id="operator:test", auth_method="local")
 
 
 def _observe(
@@ -141,6 +146,7 @@ def test_case_items_carry_rely_state(store: SQLiteStore) -> None:
     store.commit_memory(CommitMemoryRequest(
         memory_id=fact_id,
         reliance_class=RelianceClass.ACTIONABLE,
+        approved_by=_operator(),
     ))
 
     observed_id = _observe(store, scope, MemoryKind.FACT, {"text": "still observed"})
@@ -172,11 +178,13 @@ def test_case_summary_remains_non_actionable(store: SQLiteStore) -> None:
     # advisory is allowed for summary; actionable is not
     assert bundle.summary.rely_ok is True
 
-    # Now try to make it actionable — should be blocked
+    # Even with operator approval at commit time, summary cannot be
+    # actionable — the rely-time check in _compute_rely_state enforces it.
     summary_id2 = _observe(store, scope, MemoryKind.SUMMARY, {"title": "v2"})
     store.commit_memory(CommitMemoryRequest(
         memory_id=summary_id2,
         reliance_class=RelianceClass.ACTIONABLE,
+        approved_by=_operator(),
     ))
     bundle2 = store.get_case(GetCaseRequest(scope=scope))
     assert bundle2.summary is not None
@@ -228,6 +236,7 @@ def test_case_record_relations(store: SQLiteStore) -> None:
     store.commit_memory(CommitMemoryRequest(
         memory_id=fact_id,
         reliance_class=RelianceClass.ACTIONABLE,
+        approved_by=_operator(),
         premises=[PremiseRef(
             memory_id=experiment_id,
             relation="confirmed_by",

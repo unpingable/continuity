@@ -25,19 +25,24 @@ from continuity.api.models import (
     Basis,
     CommitMemoryRequest,
     GetCaseRequest,
+    ImportMemoryRequest,
     MemoryKind,
     MemoryStatus,
     ObserveMemoryRequest,
     QueryMemoryRequest,
     RelianceClass,
+    RepairMemoryRequest,
     RevokeMemoryRequest,
     SourceRef,
     PremiseRef,
 )
 from continuity.receipts.memory_receipts import format_receipt
 from continuity.store.sqlite import (
+    ContentHashMismatchError,
     InvalidTransitionError,
+    IslandWriteRefusedError,
     MemoryNotFoundError,
+    PolicyDeniedError,
     SQLiteStore,
 )
 from continuity.util.dbpath import (
@@ -72,7 +77,10 @@ def _scope_label(args: argparse.Namespace, source: str) -> str | None:
 def _get_store(args: argparse.Namespace) -> SQLiteStore:
     db_path, source = _resolve(args)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    store = SQLiteStore(db_path)
+    store = SQLiteStore(
+        db_path,
+        allow_island=getattr(args, "allow_island", False),
+    )
     store.initialize(
         scope_kind=source_to_scope_kind(source),
         scope_label=_scope_label(args, source),
@@ -203,11 +211,12 @@ def cmd_bootstrap(args: argparse.Namespace) -> None:
 def cmd_where(args: argparse.Namespace) -> None:
     """Show the active database path, how it was resolved, and its identity."""
     db_path, source = _resolve(args)
+    resolved_kind = source_to_scope_kind(source)
     info: dict[str, Any] = {
         "db_path": str(db_path),
         "source": source,
         "exists": db_path.exists(),
-        "scope_kind_resolved": source_to_scope_kind(source),
+        "scope_kind_resolved": resolved_kind,
     }
     if db_path.exists():
         # Initialize is idempotent and will create the store_metadata table
@@ -215,6 +224,13 @@ def cmd_where(args: argparse.Namespace) -> None:
         store = SQLiteStore(db_path)
         store.initialize()
         info["metadata"] = store.get_store_metadata()
+
+    info["warnings"] = _island_warnings(
+        source=source,
+        resolved_kind=resolved_kind,
+        stored_kind=(info.get("metadata") or {}).get("scope_kind"),
+        db_path=db_path,
+    )
 
     if args.json:
         _out(info)
@@ -232,6 +248,46 @@ def cmd_where(args: argparse.Namespace) -> None:
         print(f"schema_ver:   {m.get('schema_version')}")
         print(f"git_root:     {m.get('git_root') or '(none)'}")
         print(f"created_at:   {m.get('created_at')}")
+    if info["warnings"]:
+        print()
+        for w in info["warnings"]:
+            print(f"warning: {w}")
+
+
+def _island_warnings(
+    *,
+    source: str,
+    resolved_kind: str,
+    stored_kind: str | None,
+    db_path: Path,
+) -> list[str]:
+    """Build the topology-warning list shown by `where` and `doctor`.
+
+    Surfaces the islands-of-continuity defect class: silent fallback to a
+    project-local DB when the operator may believe they are writing to a
+    shared workspace (see docs/gaps/ISLANDS_OF_CONTINUITY.md).
+    """
+    warnings: list[str] = []
+    if source == "git-root":
+        warnings.append(
+            "resolved by git-root fallback — cross-project-shaped scopes "
+            "(global / workspace*) will refuse without --allow-island. "
+            "If you intend shared state, set CONTINUITY_WORKSPACE or "
+            "--workspace to point at the shared store."
+        )
+    if source == "global-fallback":
+        warnings.append(
+            "no git repo or workspace selected — landing in the global "
+            "fallback DB. Confirm this is intentional before writing "
+            "project-scoped state here."
+        )
+    if stored_kind == "project" and resolved_kind == "workspace":
+        warnings.append(
+            "store was stamped as 'project' at init time but you asked "
+            "for a workspace context — the DB identity disagrees with "
+            "the resolution. Verify you are pointing at the right store."
+        )
+    return warnings
 
 
 # ---------------------------------------------------------------------------
@@ -420,10 +476,166 @@ def cmd_revoke(args: argparse.Namespace) -> None:
         })
 
 
+def cmd_repair(args: argparse.Namespace) -> None:
+    store = _get_store(args)
+    memory_id = _resolve_memory_id(args)
+
+    actor = None
+    if args.actor:
+        actor = ActorRef(principal_id=args.actor, auth_method="cli")
+
+    patch = _parse_repair_patch(args)
+    if not patch:
+        print(
+            "error: --patch or one of --content/--source-refs/--confidence is "
+            "required",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    req = RepairMemoryRequest(
+        memory_id=memory_id,
+        reason=args.reason,
+        patch=patch,
+        target_event_id=args.target_event,
+        target_receipt_id=args.target_receipt,
+        actor=actor,
+        idempotency_key=args.idempotency_key,
+    )
+
+    resp = store.repair_memory(req)
+
+    if args.receipt:
+        _out(format_receipt(resp.receipt))
+    elif args.quiet:
+        print(resp.memory.memory_id)
+    else:
+        _out({
+            "memory_id": resp.memory.memory_id,
+            "event_id": resp.event.event_id,
+            "receipt_id": resp.receipt.receipt_id,
+            "receipt_hash": resp.receipt.hash,
+        })
+
+
+def _parse_repair_patch(args: argparse.Namespace) -> dict[str, Any]:
+    """Build a repair patch from CLI flags.
+
+    --patch JSON overrides flag-style construction. Flag-style supports
+    --content (JSON or key=value pairs) and --confidence (float). Adding
+    structured source_refs from CLI uses --source-ref kind:ref[:note],
+    matching observe.
+    """
+    if args.patch:
+        try:
+            decoded = json.loads(args.patch)
+        except json.JSONDecodeError as exc:
+            print(f"error: --patch must be valid JSON: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not isinstance(decoded, dict):
+            print("error: --patch must be a JSON object", file=sys.stderr)
+            sys.exit(2)
+        return decoded
+
+    patch: dict[str, Any] = {}
+    if args.content is not None:
+        patch["content"] = _parse_content(args.content)
+    if args.confidence is not None:
+        patch["confidence"] = args.confidence
+    if args.source_ref:
+        patch["source_refs"] = [
+            _parse_source_ref(sr).model_dump(mode="json") for sr in args.source_ref
+        ]
+    return patch
+
+
 def cmd_get(args: argparse.Namespace) -> None:
     store = _get_store(args)
     memory = store.get_memory(args.memory_id)
     _out(memory)
+
+
+def cmd_import(args: argparse.Namespace) -> None:
+    """Import a memory from a source store into the local store.
+
+    Reads the source memory directly from its SQLite file. Recomputes
+    content_hash and verifies before writing locally. Refuses on hash
+    mismatch (V1 does not silently overwrite — revoke + re-import is the
+    operator path).
+    """
+    from continuity.util.hashing import content_hash
+
+    source_path = Path(args.from_db).expanduser().resolve()
+    if not source_path.exists():
+        print(f"error: source DB does not exist: {source_path}", file=sys.stderr)
+        sys.exit(1)
+
+    src_store = SQLiteStore(source_path)
+    src_store.initialize()  # idempotent metadata read
+
+    try:
+        src_memory = src_store.get_memory(args.memory_id)
+    except MemoryNotFoundError:
+        print(
+            f"error: memory {args.memory_id} not found in source store "
+            f"{source_path}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    src_metadata = src_store.get_store_metadata() or {}
+    source_store_id = src_metadata.get("store_id") or str(source_path)
+    src_hash = content_hash(src_memory)
+    # If the caller passed --expected-hash, verify against the source —
+    # catches the case where the operator's pin is stale.
+    if args.expected_hash and args.expected_hash != src_hash:
+        print(
+            f"error: --expected-hash {args.expected_hash} does not match the "
+            f"current source hash {src_hash}. Source has drifted; pin needs "
+            f"refresh before import.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    target_store = _get_store(args)
+    actor = None
+    if args.actor:
+        actor = ActorRef(principal_id=args.actor, auth_method="cli")
+
+    req = ImportMemoryRequest(
+        source_store_id=source_store_id,
+        source_ref=str(source_path),
+        memory_id=src_memory.memory_id,
+        scope=src_memory.scope,
+        kind=src_memory.kind,
+        basis=src_memory.basis,
+        content=src_memory.content,
+        reliance_class=src_memory.reliance_class,
+        supersedes=src_memory.supersedes,
+        confidence=src_memory.confidence,
+        source_refs=src_memory.source_refs,
+        expires_at=src_memory.expires_at,
+        status=src_memory.status,
+        expected_content_hash=src_hash,
+        actor=actor,
+        idempotency_key=args.idempotency_key,
+    )
+
+    resp = target_store.import_memory(req)
+    if args.receipt:
+        _out(format_receipt(resp.receipt))
+    elif args.quiet:
+        print(resp.memory.memory_id)
+    else:
+        _out({
+            "memory_id": resp.memory.memory_id,
+            "source_store_id": source_store_id,
+            "content_hash": src_hash,
+            "spool_import_id": resp.spool_import_id,
+            "already_imported": resp.already_imported,
+            "receipt_id": resp.receipt.receipt_id,
+            "receipt_hash": resp.receipt.hash,
+        })
 
 
 def cmd_query(args: argparse.Namespace) -> None:
@@ -454,8 +666,25 @@ def cmd_query(args: argparse.Namespace) -> None:
 
 def cmd_explain(args: argparse.Namespace) -> None:
     store = _get_store(args)
-    resp = store.explain_memory(args.memory_id)
+    evaluation_time = _parse_cli_evaluation_time(args.evaluation_time)
+    resp = store.explain_memory(
+        args.memory_id, evaluation_time=evaluation_time,
+    )
     _out(resp)
+
+
+def _parse_cli_evaluation_time(value: str | None) -> "datetime | None":
+    """Parse --evaluation-time into a tz-aware datetime; passthrough None."""
+    if value is None:
+        return None
+    from datetime import datetime, timezone
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def cmd_latest(args: argparse.Namespace) -> None:
@@ -598,6 +827,16 @@ def build_parser() -> argparse.ArgumentParser:
             "$CONTINUITY_WORKSPACE."
         ),
     )
+    parser.add_argument(
+        "--allow-island", dest="allow_island", action="store_true",
+        help=(
+            "opt in to cross-project-shaped writes (scope=global / "
+            "scope=workspace*) against a project-local DB. Without this "
+            "flag, such writes refuse with an islands-of-continuity error "
+            "so a global memory cannot silently land in an island "
+            "(see docs/gaps/ISLANDS_OF_CONTINUITY.md)."
+        ),
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -725,9 +964,70 @@ def build_parser() -> argparse.ArgumentParser:
     p_rev.add_argument("--receipt", action="store_true", help="output full receipt")
     p_rev.add_argument("-q", "--quiet", action="store_true", help="output only memory_id")
 
+    # repair (narrow: content / source_refs / confidence only)
+    p_rep = sub.add_parser(
+        "repair",
+        help=(
+            "repair a recording error (content/source_refs/confidence only; "
+            "use supersede or revoke+recommit for semantic changes)"
+        ),
+    )
+    p_rep.add_argument("memory_id", nargs="?", default=None)
+    p_rep.add_argument("--memory-id", dest="memory_id_flag", default=None)
+    p_rep.add_argument("--reason", required=True)
+    p_rep.add_argument(
+        "--patch", default=None,
+        help="full patch as JSON object; overrides --content/--source-ref/--confidence",
+    )
+    p_rep.add_argument("--content", default=None, help="JSON or key=value,key=value")
+    p_rep.add_argument(
+        "--source-ref", action="append", help="kind:ref[:note]; replaces source_refs",
+    )
+    p_rep.add_argument("--confidence", type=float, default=None)
+    p_rep.add_argument(
+        "--target-event", dest="target_event", default=None,
+        help="event_id this repair corrects (optional)",
+    )
+    p_rep.add_argument(
+        "--target-receipt", dest="target_receipt", default=None,
+        help="receipt_id this repair corrects (optional)",
+    )
+    p_rep.add_argument("--actor", help="principal_id for the actor")
+    p_rep.add_argument("--idempotency-key", default=None)
+    p_rep.add_argument("--receipt", action="store_true", help="output full receipt")
+    p_rep.add_argument("-q", "--quiet", action="store_true", help="output only memory_id")
+
     # get
     p_get = sub.add_parser("get", help="get a memory by ID")
     p_get.add_argument("memory_id")
+
+    # import (cross-DB pinned-hash import)
+    p_imp = sub.add_parser(
+        "import",
+        help=(
+            "import a memory from a source SQLite store with content-hash "
+            "verification (see docs/gaps/CROSS_SCOPE_REFERENCE_GAP.md)"
+        ),
+    )
+    p_imp.add_argument(
+        "--from", dest="from_db", required=True,
+        help="path to the source continuity DB to import from",
+    )
+    p_imp.add_argument(
+        "--memory-id", required=True,
+        help="memory_id in the source store to import",
+    )
+    p_imp.add_argument(
+        "--expected-hash", default=None,
+        help=(
+            "optional sha256:... content_hash the operator expects; if set "
+            "and the source has drifted, import refuses"
+        ),
+    )
+    p_imp.add_argument("--actor", help="principal_id for the actor")
+    p_imp.add_argument("--idempotency-key", default=None)
+    p_imp.add_argument("--receipt", action="store_true", help="output full receipt")
+    p_imp.add_argument("-q", "--quiet", action="store_true", help="output only memory_id")
 
     # query
     p_qry = sub.add_parser("query", help="query memories")
@@ -744,6 +1044,13 @@ def build_parser() -> argparse.ArgumentParser:
     # explain
     p_exp = sub.add_parser("explain", help="explain a memory (lineage, premises, rely_ok)")
     p_exp.add_argument("memory_id")
+    p_exp.add_argument(
+        "--evaluation-time", default=None,
+        help=(
+            "ISO-8601 timestamp; compute rely_ok/expiry as of that moment "
+            "(historical replay). Defaults to current wall clock."
+        ),
+    )
 
     # latest
     p_latest = sub.add_parser(
@@ -808,7 +1115,9 @@ COMMANDS = {
     "observe": cmd_observe,
     "commit": cmd_commit,
     "revoke": cmd_revoke,
+    "repair": cmd_repair,
     "get": cmd_get,
+    "import": cmd_import,
     "query": cmd_query,
     "explain": cmd_explain,
     "latest": cmd_latest,
@@ -829,6 +1138,20 @@ def main(argv: list[str] | None = None) -> None:
     except InvalidTransitionError as exc:
         print(f"error: invalid transition: {exc}", file=sys.stderr)
         sys.exit(1)
+    except PolicyDeniedError as exc:
+        print(
+            f"refused: {exc.reason}\n"
+            f"refusal_receipt: {exc.refusal_receipt.receipt_id} "
+            f"hash={exc.refusal_receipt.hash}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    except IslandWriteRefusedError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except ContentHashMismatchError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        sys.exit(2)
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)

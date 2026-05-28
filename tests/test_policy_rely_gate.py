@@ -216,9 +216,12 @@ def test_policy_blocks_inference_actionable(store: SQLiteStore) -> None:
         content={"fact": "inferred from logs"},
     ))
 
+    # Operator approves the commit; rely-time check is the gate for
+    # inference+actionable (see _compute_rely_state and allow_rely below).
     store.commit_memory(CommitMemoryRequest(
         memory_id=obs.memory.memory_id,
         reliance_class=RelianceClass.ACTIONABLE,
+        approved_by=_operator(),
     ))
 
     memory = store.get_memory(obs.memory.memory_id)
@@ -226,3 +229,103 @@ def test_policy_blocks_inference_actionable(store: SQLiteStore) -> None:
     result = policy.allow_rely(memory)
     assert not result.allowed
     assert "inference" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Time discipline V1: explicit evaluation_time on the rely path
+# (docs/gaps/CONTINUITY_TIME_DISCIPLINE.md)
+# ---------------------------------------------------------------------------
+
+
+def _committed_expiring_memory(store: SQLiteStore, expires_at):
+    """Helper: observe + commit a fact with an expires_at; return memory_id."""
+    obs = store.observe_memory(ObserveMemoryRequest(
+        scope="expiry-test",
+        kind=MemoryKind.FACT,
+        basis=Basis.DIRECT_CAPTURE,
+        content={"fact": "will expire"},
+        expires_at=expires_at,
+    ))
+    store.commit_memory(CommitMemoryRequest(
+        memory_id=obs.memory.memory_id,
+        reliance_class=RelianceClass.ADVISORY,
+        approved_by=_operator(),
+        expires_at=expires_at,
+    ))
+    return obs.memory.memory_id
+
+
+def test_historical_evaluation_time_returns_not_expired(store: SQLiteStore) -> None:
+    """A memory now-expired was not yet expired at a past evaluation_time."""
+    from datetime import datetime, timedelta, timezone
+
+    expires = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    mem_id = _committed_expiring_memory(store, expires)
+
+    # Past evaluation: before expiry -> rely_ok.
+    past = expires - timedelta(days=30)
+    past_explain = store.explain_memory(mem_id, evaluation_time=past)
+    assert past_explain.rely_ok is True, past_explain.rely_reason
+
+    # Default (now) evaluation: well past expiry -> not rely_ok.
+    current = store.explain_memory(mem_id)
+    assert current.rely_ok is False
+    assert "expired" in current.rely_reason
+
+
+def test_future_evaluation_time_returns_expired(store: SQLiteStore) -> None:
+    """An explicit future evaluation_time past expires_at returns expired."""
+    from datetime import datetime, timedelta, timezone
+
+    expires = datetime(2099, 1, 1, tzinfo=timezone.utc)  # not yet expired wall-clock
+    mem_id = _committed_expiring_memory(store, expires)
+
+    # Default evaluation: not expired (wall-clock is well before 2099).
+    current = store.explain_memory(mem_id)
+    assert current.rely_ok is True
+
+    # Future evaluation: past the expires_at -> expired.
+    future = expires + timedelta(days=1)
+    future_explain = store.explain_memory(mem_id, evaluation_time=future)
+    assert future_explain.rely_ok is False
+    assert "expired" in future_explain.rely_reason
+
+
+def test_explain_response_surfaces_evaluation_time(store: SQLiteStore) -> None:
+    """ExplainMemoryResponse.evaluation_time reflects the time actually used."""
+    from datetime import datetime, timezone
+
+    obs = store.observe_memory(ObserveMemoryRequest(
+        scope="eval-time-test",
+        kind=MemoryKind.FACT,
+        basis=Basis.DIRECT_CAPTURE,
+        content={"fact": "audit me"},
+    ))
+    store.commit_memory(CommitMemoryRequest(
+        memory_id=obs.memory.memory_id,
+        reliance_class=RelianceClass.ADVISORY,
+        approved_by=_operator(),
+    ))
+
+    # Explicit evaluation_time round-trips.
+    t = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
+    resp = store.explain_memory(obs.memory.memory_id, evaluation_time=t)
+    assert resp.evaluation_time == t
+
+    # Default boundary resolves to a real datetime (never None).
+    default_resp = store.explain_memory(obs.memory.memory_id)
+    assert default_resp.evaluation_time is not None
+
+
+def test_trigger_dropped_app_owns_updated_at(store: SQLiteStore) -> None:
+    """After init the legacy updated_at trigger must not exist; app owns the clock."""
+    import sqlite3
+    conn = sqlite3.connect(str(store.db_path))
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'trigger' AND name = 'trg_memory_objects_updated_at'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is None, "legacy updated_at trigger should not exist on a fresh store"
