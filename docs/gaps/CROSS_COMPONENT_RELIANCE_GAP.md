@@ -156,6 +156,12 @@ This gap is closed when:
 - Per-consumer integration sketches are present in `docs/integrations.md` for NQ, Nightshift, Wicket, Standing.
 - No sibling-repo code changes are required to land this gap — the substrate ships; consumers adopt on their own cadence.
 
+## Remote-standing composition (trigger note)
+
+If any reliance/import path in this gap (or downstream consumer adoption of `relied_on` receipts) ever becomes **networked, federated, cross-host, or non-filesystem-local**, the cross-constellation remote-standing-boundary doctrine (`~/git/cartography/coordination/nq-REMOTE_STANDING_BOUNDARY.md`) composes here. The required vocabulary then includes `exposure_profile`, standing resolver, action class, receipt-recorded standing basis, and reliance class.
+
+V1 of this gap is explicit that continuity does not become a network oracle (substrate-side V1 is local-only verification). The breadcrumb captures the composition shape so the future gap that introduces a network rely or network import inherits the doctrine, rather than reinventing it. No remote rely or remote import is proposed, planned, or authorized.
+
 ## Short Version
 
 Continuity does not become a network oracle. It does not decide who may speak. It records what was relied on, surfaces drift honestly, and stays out of the rely path. Cross-host reliance is shaped by three keepers — *records what may be relied on, does not decide who may speak; distributes reliance records, does not distribute the rely path; cross-host reliance cannot be stronger than local reliance replay*. V1 ships a `relied_on` receipt convention (memory_id + content_hash + evaluation_time + optional `verification_mode`/scope/reliance_class/source_store_id), a local-only `contctl reliance verify` walker with the same logic exposed via `memory_verify_reliance` MCP tool, a worked StandingRef example, and a workspace-scope doctrine memory committed as the first dogfood. The substrate from `CROSS_SCOPE_REFERENCE_GAP` does the heavy lifting; this gap names the consumer doctrine on top of it.

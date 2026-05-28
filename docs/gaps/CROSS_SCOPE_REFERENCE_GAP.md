@@ -142,6 +142,12 @@ This gap is closed when:
 - At least one real shared-object class (gap specs, doctrine) is proven end-to-end: authored in one store, imported by another, cited by a local memory, walkable via `explain()`.
 - No existing continuity primitive was duplicated; the cross-scope layer is additive, not parallel.
 
+## Remote-standing composition (trigger note)
+
+If `import_memory` or any related reliance/import path ever becomes **networked, federated, cross-host, or non-filesystem-local**, the cross-constellation remote-standing-boundary doctrine (`~/git/cartography/coordination/nq-REMOTE_STANDING_BOUNDARY.md`) composes here. The required vocabulary then includes `exposure_profile`, standing resolver, action class, receipt-recorded standing basis, and reliance class.
+
+This is a trigger note, not a design. No remote import path is proposed, planned, or authorized. The breadcrumb exists so the future gap that introduces a network surface inherits the doctrine rather than reinventing it.
+
 ## Short Version
 
 The gap is not "we need a model for shared context."

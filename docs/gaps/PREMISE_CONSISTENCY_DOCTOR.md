@@ -2,8 +2,8 @@
 
 **Status:** proposed
 **Depends on:** existing memory entries with `[[premise]]`-style links (currently informal in `~/.claude/projects/*/memory/`), planned `continuity doctor` audit harness
-**Related:** `CROSS_ISLAND_BRIDGES_GAP.md` (audited memories may cross island boundaries — bridges deferred), `ISLAND_DISCIPLINE.md`
-**Last updated:** 2026-05-13
+**Related:** `CROSS_ISLAND_BRIDGES_GAP.md` (audited memories may cross island boundaries — bridges deferred), `ISLAND_DISCIPLINE.md`, `~/git/cartography/coordination/SELF-SUBJECT-COLLAPSE.md` (cross-component pattern — the discipline below is continuity's local manifestation)
+**Last updated:** 2026-05-28
 
 ## The Problem
 
@@ -32,6 +32,20 @@ All five share one structure: child contradicts premise across layers, invisible
 **Premise links should function as review surfaces, not just provenance trails.** A linked premise constrains the child memory; if a memory cites a premise, it inherits a consistency obligation. `continuity doctor --check premise-consistency` walks memory entries, follows premise links, and flags entries whose wording weakens or contradicts the operational requirement of any cited premise.
 
 The doctor is audit, not gate. It reports; operators resolve.
+
+## Self-Subject Collapse discipline
+
+The doctor's subject is continuity. The doctor's actor is also continuity. That makes premise-consistency a standing-prohibition instance of the cross-component pattern named in `~/git/cartography/coordination/SELF-SUBJECT-COLLAPSE.md`: a finding whose subject is the producing component may be reported by that component, but it may not be resolved by it. The continuity-local manifestation:
+
+- **Continuity-as-doctor may report findings about continuity's own substrate or state.** That is the doctor's job.
+- **Continuity-as-doctor may not self-resolve those findings.** No code path inside the doctor produces a verdict that closes, clears, ratifies, or absolves a flag it raised.
+- **Every finding where continuity is both actor and subject routes to an external reconciler.** The operator is the natural reconciler today; a deliberately-architected external actor may take that role later. The routing target is named on the finding; the absence of a target is itself a flag, not an implicit clearance.
+- **Doctor output is testimony / finding, not authority.** A FLAG is a claim about the substrate; it is not a `reliance_class` change, not a status mutation, not a receipt that closes a prior receipt.
+- **Premise-consistency findings do not mutate, suppress, rewrite, or auto-ratify memory records.** The substrate is read-only to the doctor at this seam. Any write that resolves a finding is an operator act with its own receipt, not a doctor effect.
+
+> **A continuity doctor may diagnose continuity. It may not absolve continuity.**
+
+This belongs in the spec before implementation because the self-resolution bug, once written, gets refactored into "maintenance" and stops looking like a category error. Naming it as a discipline up front prevents the doctor from growing a `--fix` flag that quietly cures whatever it just flagged.
 
 ## V1 Slice
 

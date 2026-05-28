@@ -38,3 +38,4 @@ Keep them short. A candidate that needs the full gap-spec structure is probably 
 | Note | Originated | One-line |
 |------|------------|----------|
 | [`MAP_SKEW.md`](MAP_SKEW.md) | 2026-05-20 | Directional belief-state error detection — memory has direction, not just age. Cross-organ; waiting on observation-side owner and time-discipline V2 substrate. |
+| [`WLP_RECEIPT_CUSTODY.md`](WLP_RECEIPT_CUSTODY.md) | 2026-05-28 | Continuity has the shape of an adopter for WLP-serialized AuthorizationReceipts / RevocationReceipts. Custody and discovery only — never routing, validation, authorization, reconciliation, or truth arbitration. Keeper: *continuity may store the receipt; it may not become the authority the receipt claims.* |
