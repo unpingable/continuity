@@ -38,6 +38,10 @@ from continuity.api.models import (
     PremiseRef,
     VerifyRelianceRequest,
 )
+from continuity.doctor import (
+    FindingStatus,
+    check_premise_consistency,
+)
 from continuity.receipts.memory_receipts import format_receipt
 from continuity.store.sqlite import (
     ContentHashMismatchError,
@@ -866,6 +870,94 @@ def cmd_stats(args: argparse.Namespace) -> None:
     })
 
 
+def _resolve_memory_dir(args: argparse.Namespace) -> Path:
+    """Resolve which memory directory the doctor scans.
+
+    Order: explicit positional path; $CLAUDE_PROJECT_DIR-derived auto-
+    memory path; cwd's auto-memory path under
+    ~/.claude/projects/<encoded-cwd>/memory/.
+    """
+    if getattr(args, "path", None):
+        return Path(args.path).expanduser().resolve()
+
+    def _claude_dir_for(p: Path) -> Path:
+        encoded = "-" + str(p.resolve()).strip("/").replace("/", "-")
+        return Path.home() / ".claude" / "projects" / encoded / "memory"
+
+    env = os.environ.get("CLAUDE_PROJECT_DIR")
+    if env:
+        candidate = _claude_dir_for(Path(env))
+        if candidate.exists():
+            return candidate
+
+    return _claude_dir_for(Path.cwd())
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    """Run an audit check.
+
+    V1 supports --check premise-consistency. Doctor output is testimony,
+    not authority; per docs/gaps/PREMISE_CONSISTENCY_DOCTOR.md
+    self-subject-collapse discipline, no findings are auto-resolved and
+    the doctor performs no writes.
+    """
+    if args.check != "premise-consistency":
+        # argparse choices already constrains this; defensive.
+        print(f"error: unknown check '{args.check}'", file=sys.stderr)
+        sys.exit(1)
+
+    memory_dir = _resolve_memory_dir(args)
+    if not memory_dir.exists():
+        print(
+            f"error: memory directory does not exist: {memory_dir}\n"
+            "pass an explicit PATH or set CLAUDE_PROJECT_DIR",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not memory_dir.is_dir():
+        print(f"error: not a directory: {memory_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    findings = check_premise_consistency(memory_dir)
+
+    if getattr(args, "json", False):
+        payload = {
+            "check": args.check,
+            "memory_dir": str(memory_dir),
+            "findings": [f.to_dict() for f in findings],
+        }
+        print(json.dumps(payload, indent=2))
+    else:
+        flags = [f for f in findings if f.status == FindingStatus.FLAG]
+        missing = [f for f in findings if f.status == FindingStatus.MISSING]
+        ok_count = sum(1 for f in findings if f.status == FindingStatus.OK)
+
+        print(f"premise-consistency check: {memory_dir}")
+        print(f"  {ok_count} OK, {len(flags)} FLAG, {len(missing)} MISSING")
+        for f in flags:
+            print()
+            print(f"FLAG  child:   {f.child_file}")
+            print(f"      premise: {f.premise_file}")
+            print(f"      reason:  {f.reason}")
+            premise_phrase = f.evidence.get("premise_phrase", "").strip()
+            child_phrase = f.evidence.get("child_phrase", "").strip()
+            if premise_phrase:
+                print(f"      premise_phrase: {premise_phrase}")
+            if child_phrase:
+                print(f"      child_phrase:   {child_phrase}")
+        for f in missing:
+            print()
+            print(f"MISSING  child:   {f.child_file}")
+            print(f"         slug:    {f.premise_slug}")
+            print(f"         reason:  {f.reason}")
+
+    has_issues = any(
+        f.status in (FindingStatus.FLAG, FindingStatus.MISSING)
+        for f in findings
+    )
+    sys.exit(2 if has_issues else 0)
+
+
 # ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
@@ -1178,6 +1270,30 @@ def build_parser() -> argparse.ArgumentParser:
     # stats
     sub.add_parser("stats", help="show database statistics")
 
+    # doctor — audit checks over memory artifacts
+    p_doc = sub.add_parser(
+        "doctor",
+        help=(
+            "run audit checks against memory artifacts. Doctor output is "
+            "testimony, not authority — findings do not auto-resolve. "
+            "See docs/gaps/PREMISE_CONSISTENCY_DOCTOR.md."
+        ),
+    )
+    p_doc.add_argument(
+        "--check", required=True,
+        choices=["premise-consistency"],
+        help="which check to run",
+    )
+    p_doc.add_argument(
+        "path", nargs="?", default=None,
+        help=(
+            "path to a memory directory of .md files. "
+            "Default: $CLAUDE_PROJECT_DIR-derived auto-memory path, then "
+            "cwd-derived auto-memory path."
+        ),
+    )
+    p_doc.add_argument("--json", action="store_true", help="output as JSON")
+
     return parser
 
 
@@ -1213,6 +1329,7 @@ COMMANDS = {
     "latest": cmd_latest,
     "case": cmd_case,
     "stats": cmd_stats,
+    "doctor": cmd_doctor,
 }
 
 
