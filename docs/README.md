@@ -18,6 +18,7 @@ A map of this directory. Start from the top if you're new.
 | [`integrations.md`](integrations.md) | MCP server, `contctl` CLI, and Python library — each as a reference, with minimal examples and entry points |
 | [`scoping.md`](scoping.md) | Workflow discipline: choosing between repo docs / Claude memory / continuity; selecting scope, kind, basis, reliance class; anti-patterns and new-repo bootstrap |
 | [`gaps/`](gaps/) | Gap specs: proposed doctrine for load-bearing architectural or storage shifts, before implementation |
+| [`candidates/`](candidates/) | Architectural ideas that have earned a name but not yet a gap-spec — keeper lines, vocabulary, slots reserved until graduation triggers fire |
 
 ## Agent instruction files (not in this directory)
 
