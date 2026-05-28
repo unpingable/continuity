@@ -1,9 +1,9 @@
 # Gap: Continuity Time Discipline — be time-aware without hiding which clock you used
 
-**Status:** proposed
+**Status:** V1 implemented (commit `1d01b91`, 2026-05-27); V2 fields still proposed
 **Depends on:** existing `util/clock.py`, `MemoryPolicy.allow_rely`, `_compute_rely_state` in `sqlite.py`, the `trg_memory_objects_updated_at` SQL trigger
 **Related:** `CONTINUITY_ORIENT_HOOK.md` (read-side staleness gradient is upstream of any future "orient-only past T" posture); constellation-wide time audit (NQ / NS / Wicket / WLP / RPP / AG carry their own time-shaped gaps in their respective repos)
-**Last updated:** 2026-05-18
+**Last updated:** 2026-05-28
 
 ## The Problem
 
@@ -90,6 +90,18 @@ ALTER TABLE memory_objects ADD COLUMN last_confirmed_at  TEXT NULL;
    - dropped trigger: `updated_at` continues to bump correctly through the application path; concurrent writes from multiple connections still get monotonic-enough updates for the test suite;
    - `ExplainMemoryResponse.evaluation_time` reflects the time actually used (including the boundary default).
 
+### Landed as
+
+V1 shipped in commit `1d01b91` (2026-05-27, phase 0+1). Concretely:
+
+- `_compute_rely_state` (`src/continuity/store/sqlite.py`) takes `evaluation_time: datetime` as a required parameter; the kernel makes no clock reads.
+- `MemoryStore.explain_memory`, the query path (`query_memory`), and `get_case` accept optional `evaluation_time` and resolve the boundary default once via `utcnow()` when callers pass `None`.
+- `ExplainMemoryResponse.evaluation_time` surfaces the time used; cross-scope explain on imported premises uses the same parameter for expiration state.
+- `schema.sql` carries no `CREATE TRIGGER`; `SQLiteStore.migrate_schema` drops `trg_memory_objects_updated_at` idempotently from existing databases. Row inserts and updates set `updated_at` via `isoformat_now()` at the application boundary.
+- Tests: `tests/test_policy_rely_gate.py::test_historical_evaluation_time_returns_not_expired`, `::test_future_evaluation_time_returns_expired`, `::test_explain_response_surfaces_evaluation_time`; `tests/test_cross_scope_explain.py::test_imported_premise_state_expired_at_evaluation_time`. Refusal receipts also carry `evaluation_time` (`tests/test_refusal_receipt.py`).
+
+V2 fields (`source_observed_at`, `last_confirmed_at`, staleness posture) remain named-but-unbuilt per the deferrals below.
+
 ## Deliberately out of scope (v1)
 
 - **`source_observed_at`** — named in invariant 8, not built. V2 begins when an audit surface or capture path demonstrates the source-vs-record gap is costing real information.
@@ -101,12 +113,14 @@ ALTER TABLE memory_objects ADD COLUMN last_confirmed_at  TEXT NULL;
 
 ## Acceptance Criteria
 
-- `rely_ok` cannot be computed without either an explicit `evaluation_time` or a boundary default that resolved from exactly one `utcnow()` read. The internal computation never calls the clock.
-- A test supplies a past `evaluation_time` and demonstrates that a now-expired memory was not yet expired at T — rely is reconstructible against historical evaluation times.
-- The `trg_memory_objects_updated_at` trigger is dropped; `updated_at` is set entirely through `utcnow()` at the application layer.
-- `ExplainMemoryResponse` surfaces the `evaluation_time` used to compute `rely_ok`.
-- No new schema columns land. V2 capture-side fields remain named-but-unbuilt.
-- The keeper lines and design stance are preserved verbatim in the spec body: *Memory time is not source time. Old continuity can orient. It must not silently bind. No timestamp may impersonate another timestamp. Continuity may reason about time, but it must not hide which clock it used.*
+All V1 criteria below are met as of commit `1d01b91`:
+
+- ✅ `rely_ok` cannot be computed without either an explicit `evaluation_time` or a boundary default that resolved from exactly one `utcnow()` read. The internal computation never calls the clock.
+- ✅ A test supplies a past `evaluation_time` and demonstrates that a now-expired memory was not yet expired at T — rely is reconstructible against historical evaluation times.
+- ✅ The `trg_memory_objects_updated_at` trigger is dropped; `updated_at` is set entirely through `utcnow()` at the application layer.
+- ✅ `ExplainMemoryResponse` surfaces the `evaluation_time` used to compute `rely_ok`.
+- ✅ No new schema columns land. V2 capture-side fields remain named-but-unbuilt.
+- ✅ The keeper lines and design stance are preserved verbatim in the spec body: *Memory time is not source time. Old continuity can orient. It must not silently bind. No timestamp may impersonate another timestamp. Continuity may reason about time, but it must not hide which clock it used.*
 
 ## Open Questions
 
