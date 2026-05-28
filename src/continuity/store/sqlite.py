@@ -32,6 +32,10 @@ from continuity.api.models import (
     ImportMemoryRequest,
     ImportMemoryResponse,
     ImportedPremiseStatus,
+    ReliedOnEntry,
+    ReliedOnVerification,
+    VerifyRelianceRequest,
+    VerifyRelianceResponse,
     LinkStatus,
     MemoryEvent,
     MemoryKind,
@@ -615,6 +619,111 @@ class SQLiteStore:
             bundle.last_touch = max(m.memory.updated_at for m in items)
 
         return bundle
+
+    def verify_reliance(
+        self, req: VerifyRelianceRequest,
+    ) -> VerifyRelianceResponse:
+        """Walk each relied_on entry against the local store and label drift.
+
+        Local-only by design (per docs/gaps/CROSS_COMPONENT_RELIANCE_GAP.md
+        keeper: explain may describe imported reliance locally; refresh may
+        test source reachability; do not merge them). No network call to
+        source stores. Each entry receives one terminal status.
+
+        Aggregate `verified` is True only if every entry is `match`.
+        """
+        out: list[ReliedOnVerification] = []
+        summary: dict[str, int] = {}
+        with self._connect() as conn:
+            for entry in req.entries:
+                verification = self._verify_one(conn, entry)
+                out.append(verification)
+                summary[verification.status] = summary.get(verification.status, 0) + 1
+        verified = all(v.status == "match" for v in out) and len(out) > 0
+        return VerifyRelianceResponse(
+            verified=verified, entries=out, summary=summary,
+        )
+
+    def _verify_one(
+        self,
+        conn: sqlite3.Connection,
+        entry: ReliedOnEntry,
+    ) -> ReliedOnVerification:
+        memory = self._maybe_get_memory(conn, entry.memory_id)
+        if memory is None:
+            return ReliedOnVerification(
+                entry=entry,
+                status="missing",
+                detail=(
+                    f"no memory with id {entry.memory_id} in local store"
+                ),
+            )
+
+        current_hash = content_hash(memory)
+
+        # mode_mismatch — claimed local_import but no import receipt exists.
+        # We check this before content_drift so the operator sees the
+        # provenance error first; a forged "imported" claim is more
+        # actionable than the content question that follows.
+        if entry.verification_mode == "local_import":
+            import_event = self._latest_event_for_memory(
+                conn, entry.memory_id, EventType.IMPORT,
+            )
+            if import_event is None:
+                return ReliedOnVerification(
+                    entry=entry,
+                    status="mode_mismatch",
+                    current_content_hash=current_hash,
+                    current_status=str(memory.status),
+                    detail=(
+                        "receipt claims verification_mode=local_import but "
+                        "no memory.import event exists locally for this "
+                        "memory_id"
+                    ),
+                )
+
+        if entry.content_hash != current_hash:
+            return ReliedOnVerification(
+                entry=entry,
+                status="content_drift",
+                current_content_hash=current_hash,
+                current_status=str(memory.status),
+                detail=(
+                    f"pinned content_hash differs from current local hash"
+                ),
+            )
+
+        # Hash matches; check state.
+        if str(memory.status) == "revoked":
+            return ReliedOnVerification(
+                entry=entry,
+                status="revoked_after",
+                current_content_hash=current_hash,
+                current_status="revoked",
+                detail="memory was revoked after this citation was recorded",
+            )
+
+        if memory.expires_at is not None:
+            eval_iso = to_isoformat(entry.evaluation_time)
+            exp_iso = to_isoformat(memory.expires_at)
+            if exp_iso and eval_iso and eval_iso >= exp_iso:
+                return ReliedOnVerification(
+                    entry=entry,
+                    status="expired_after",
+                    current_content_hash=current_hash,
+                    current_status=str(memory.status),
+                    detail=(
+                        f"memory expired at {exp_iso}; "
+                        f"evaluation_time was {eval_iso}"
+                    ),
+                )
+
+        return ReliedOnVerification(
+            entry=entry,
+            status="match",
+            current_content_hash=current_hash,
+            current_status=str(memory.status),
+        )
 
     def explain_memory(
         self,

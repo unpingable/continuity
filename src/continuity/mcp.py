@@ -48,8 +48,10 @@ from continuity.api.models import (
     PremiseRef,
     QueryMemoryRequest,
     RelianceClass,
+    ReliedOnEntry,
     RevokeMemoryRequest,
     SourceRef,
+    VerifyRelianceRequest,
 )
 from continuity.store.sqlite import (
     ContentHashMismatchError,
@@ -441,6 +443,53 @@ TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": ["memory_id"],
+        },
+    },
+    {
+        "name": "memory_verify_reliance",
+        "description": (
+            "Verify a consumer receipt's relied_on array against the "
+            "local store. Walks each citation: confirms the memory exists "
+            "locally, compares pinned content_hash against current, "
+            "checks status (revoked/expired) at the citation's "
+            "evaluation_time. Returns per-entry status (match / "
+            "content_drift / revoked_after / expired_after / missing / "
+            "mode_mismatch) plus an aggregate `verified` bool. Local-only; "
+            "does not contact source stores. See "
+            "docs/gaps/CROSS_COMPONENT_RELIANCE_GAP.md."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "relied_on": {
+                    "type": "array",
+                    "description": (
+                        "Array of relied_on entries from a consumer "
+                        "receipt. Each entry requires memory_id, "
+                        "content_hash, and evaluation_time."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "memory_id": {"type": "string"},
+                            "content_hash": {"type": "string"},
+                            "evaluation_time": {"type": "string"},
+                            "scope": {"type": "string"},
+                            "reliance_class": {
+                                "type": "string",
+                                "enum": ["none", "retrieve_only", "advisory", "actionable"],
+                            },
+                            "verification_mode": {
+                                "type": "string",
+                                "description": "local_native | local_import | unchecked",
+                            },
+                            "source_store_id": {"type": "string"},
+                        },
+                        "required": ["memory_id", "content_hash", "evaluation_time"],
+                    },
+                },
+            },
+            "required": ["relied_on"],
         },
     },
     {
@@ -886,6 +935,29 @@ class ContinuityMCPServer:
         )
         bundle = self.store.get_case(req)
         return bundle.model_dump(mode="json")
+
+    def _handle_memory_verify_reliance(
+        self, args: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw_entries = args.get("relied_on", []) or []
+        if not isinstance(raw_entries, list):
+            return {"error": "`relied_on` must be an array"}
+        entries = [ReliedOnEntry.model_validate(e) for e in raw_entries]
+        resp = self.store.verify_reliance(VerifyRelianceRequest(entries=entries))
+        return {
+            "verified": resp.verified,
+            "summary": resp.summary,
+            "entries": [
+                {
+                    "memory_id": v.entry.memory_id,
+                    "status": v.status,
+                    "current_content_hash": v.current_content_hash,
+                    "current_status": v.current_status,
+                    "detail": v.detail,
+                }
+                for v in resp.entries
+            ],
+        }
 
     def _handle_memory_stats(self, args: dict[str, Any]) -> dict[str, Any]:
         with self.store._connect() as conn:

@@ -545,6 +545,70 @@ class QueryMemoryResponse(JsonModel):
     total: int
 
 
+class ReliedOnEntry(JsonModel):
+    """A single citation in a consumer tool's receipt.
+
+    Required fields are the verification minimum. Optional fields let the
+    consumer encode how it verified the citation; verification mode keeps
+    local-native / local-imported / unchecked reliance distinguishable in
+    audit (per docs/gaps/CROSS_COMPONENT_RELIANCE_GAP.md, the
+    `relied_on` wire convention).
+    """
+    memory_id: str = Field(..., min_length=8, max_length=80)
+    content_hash: str = Field(..., min_length=16, max_length=128)
+    evaluation_time: datetime
+
+    scope: str | None = Field(default=None, max_length=255)
+    reliance_class: RelianceClass | None = None
+    # local_native | local_import | unchecked. Unknown values pass through.
+    verification_mode: str | None = Field(default=None, max_length=64)
+    source_store_id: str | None = Field(default=None, max_length=255)
+
+
+# Terminal verification statuses. Stable wire vocabulary.
+# match              — pinned hash matches current local content_hash;
+#                       memory is committed; not expired at evaluation_time
+# content_drift      — pinned hash differs from current local content_hash
+# revoked_after      — pinned matches, but local memory is now revoked
+# expired_after      — pinned matches, but expired at evaluation_time
+# missing            — memory_id does not exist locally
+# mode_mismatch      — receipt claims local_import but no import record locally
+ReliedOnStatus = Literal[
+    "match",
+    "content_drift",
+    "revoked_after",
+    "expired_after",
+    "missing",
+    "mode_mismatch",
+]
+
+
+class ReliedOnVerification(JsonModel):
+    """Per-entry verification outcome."""
+    entry: ReliedOnEntry
+    status: ReliedOnStatus
+    current_content_hash: str | None = None
+    current_status: str | None = None
+    detail: str | None = None
+
+
+class VerifyRelianceRequest(JsonModel):
+    """Input: a list of relied_on entries (or a full receipt envelope).
+
+    Callers may pass a parsed receipt's `relied_on` array directly, or the
+    whole receipt — the verification surface extracts the field.
+    """
+    entries: list[ReliedOnEntry] = Field(default_factory=list)
+
+
+class VerifyRelianceResponse(JsonModel):
+    """Aggregate + per-entry verdict."""
+    verified: bool
+    entries: list[ReliedOnVerification] = Field(default_factory=list)
+    # Number of entries per terminal status, for quick scanning.
+    summary: dict[str, int] = Field(default_factory=dict)
+
+
 class ImportedPremiseStatus(JsonModel):
     """Local-only diagnostic for a premise pointing at an imported memory.
 

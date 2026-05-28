@@ -31,10 +31,12 @@ from continuity.api.models import (
     ObserveMemoryRequest,
     QueryMemoryRequest,
     RelianceClass,
+    ReliedOnEntry,
     RepairMemoryRequest,
     RevokeMemoryRequest,
     SourceRef,
     PremiseRef,
+    VerifyRelianceRequest,
 )
 from continuity.receipts.memory_receipts import format_receipt
 from continuity.store.sqlite import (
@@ -553,6 +555,71 @@ def cmd_get(args: argparse.Namespace) -> None:
     store = _get_store(args)
     memory = store.get_memory(args.memory_id)
     _out(memory)
+
+
+def cmd_reliance_verify(args: argparse.Namespace) -> None:
+    """Verify a consumer receipt's `relied_on` array against the local store.
+
+    Reads JSON from a file path (or '-' for stdin). Accepts either a full
+    receipt envelope containing a `relied_on` key, or the bare
+    `relied_on` array. Per-entry status:
+        match / content_drift / revoked_after / expired_after / missing /
+        mode_mismatch
+    Exit 0 if all entries are `match`; exit 2 otherwise.
+    """
+    if args.receipt == "-":
+        raw = sys.stdin.read()
+    else:
+        path = Path(args.receipt).expanduser()
+        if not path.exists():
+            print(f"error: receipt file not found: {path}", file=sys.stderr)
+            sys.exit(1)
+        raw = path.read_text(encoding="utf-8")
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"error: receipt JSON could not be parsed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if isinstance(parsed, list):
+        entries_raw = parsed
+    elif isinstance(parsed, dict) and "relied_on" in parsed:
+        entries_raw = parsed["relied_on"]
+    else:
+        print(
+            "error: input must be a JSON array of relied_on entries or an "
+            "object containing a `relied_on` array",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not isinstance(entries_raw, list):
+        print("error: `relied_on` must be an array", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        entries = [ReliedOnEntry.model_validate(e) for e in entries_raw]
+    except (ValueError, TypeError) as exc:
+        print(f"error: invalid relied_on entry: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    store = _get_store(args)
+    resp = store.verify_reliance(VerifyRelianceRequest(entries=entries))
+    _out(resp)
+    if not resp.verified:
+        sys.exit(2)
+
+
+def cmd_reliance(args: argparse.Namespace) -> None:
+    """Dispatch reliance subcommands."""
+    handler = RELIANCE_COMMANDS[args.reliance_command]
+    handler(args)
+
+
+RELIANCE_COMMANDS = {
+    "verify": cmd_reliance_verify,
+}
 
 
 def cmd_import(args: argparse.Namespace) -> None:
@@ -1086,6 +1153,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="include expired memories",
     )
 
+    # reliance verify
+    p_rel = sub.add_parser(
+        "reliance",
+        help="verify or inspect cross-component reliance citations",
+    )
+    rel_sub = p_rel.add_subparsers(dest="reliance_command", required=True)
+    p_rel_verify = rel_sub.add_parser(
+        "verify",
+        help=(
+            "walk a receipt's relied_on array against the local store; "
+            "exits 0 on all-match, 2 otherwise. See "
+            "docs/gaps/CROSS_COMPONENT_RELIANCE_GAP.md."
+        ),
+    )
+    p_rel_verify.add_argument(
+        "receipt",
+        help=(
+            "path to receipt JSON; pass '-' to read from stdin. Accepts a "
+            "full receipt envelope or a bare relied_on array."
+        ),
+    )
+
     # stats
     sub.add_parser("stats", help="show database statistics")
 
@@ -1118,6 +1207,7 @@ COMMANDS = {
     "repair": cmd_repair,
     "get": cmd_get,
     "import": cmd_import,
+    "reliance": cmd_reliance,
     "query": cmd_query,
     "explain": cmd_explain,
     "latest": cmd_latest,
