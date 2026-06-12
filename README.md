@@ -4,6 +4,39 @@ Claude forgot what you decided last week. Again.
 
 You told it the auth migration was blocked on legal review. You told it the config format changed. You told it not to touch the billing module until after the freeze. It nodded, it complied, and then the session ended. Next session, it had no idea. So you told it again. And again. And you started to wonder whether "memory" means anything if nothing stops stale memory from driving action.
 
+## 30-second specimen
+
+A memory is a lifecycle, not a line in a file. Observed is not committed;
+committed is not forever; every transition is a hash-chained receipt:
+
+```bash
+pip install -e . && contctl --db demo.db init
+
+# Observe a decision — advisory, NOT yet reliable
+contctl --db demo.db observe --scope demo --kind decision \
+  --basis operator_assertion --content '{"topic":"framework","choice":"react"}' --receipt
+#   "receipt_type": "memory.observe",  "hash": "e7040e41…",  "prev_hash": null
+#   "status": "observed",  "reliance_class": "none"
+
+contctl --db demo.db explain <memory_id>     # → "rely_ok": false
+
+# Commit it — NOW it may drive action
+contctl --db demo.db commit <memory_id> --receipt
+#   "receipt_type": "memory.commit",  "hash": "11b0690e…",  "prev_hash": "e7040e41…"
+contctl --db demo.db explain <memory_id>     # → "rely_ok": true
+
+# Revoke it — negative news requires a reason, and leaves a receipt too
+contctl --db demo.db revoke <memory_id> --reason "team moved off react" --receipt
+#   "receipt_type": "memory.revoke",  "hash": "a7c60c37…",  "prev_hash": "11b0690e…"
+contctl --db demo.db explain <memory_id>     # → "rely_ok": false
+```
+
+Three states, three receipts, one chain — each `prev_hash` is the previous
+receipt's `hash`. The question "is this still safe to act on?" has a queryable
+answer (`rely_ok`), and the answer changes only through receipted transitions.
+The hashes above came from a real run; yours will differ, but the chain
+structure will not.
+
 ## What you'd normally think
 
 "It needs better memory." Longer context windows. Bigger memory files. Smarter summarization. RAG over everything. The assumption is that the problem is retrieval — the system can't find what it knew before. So you build a better search engine for past conversations and call it solved.
