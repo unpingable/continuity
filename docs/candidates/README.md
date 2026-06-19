@@ -38,6 +38,7 @@ Keep them short. A candidate that needs the full gap-spec structure is probably 
 | Note | Originated | One-line |
 |------|------------|----------|
 | [`MAP_SKEW.md`](MAP_SKEW.md) | 2026-05-20 | Directional belief-state error detection — memory has direction, not just age. Cross-organ; waiting on observation-side owner and time-discipline V2 substrate. |
+| [`PROJECTION_RECEIPT.md`](PROJECTION_RECEIPT.md) | 2026-06-18 | Stored-is-not-true. A semantic read across schema/version/projection boundaries is a witnessed claim, not a resurrection of stored truth. AG-authorized port of one receipt-kernel choke point into continuity grammar. |
 
 ## Graduated
 
