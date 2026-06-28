@@ -38,6 +38,10 @@ from continuity.api.models import (
     PremiseRef,
     VerifyRelianceRequest,
 )
+from continuity.declaration_export import (
+    ExportSource,
+    build_declaration_export,
+)
 from continuity.doctor import (
     FindingStatus,
     check_premise_consistency,
@@ -839,6 +843,54 @@ def cmd_case(args: argparse.Namespace) -> None:
     _render_bucket("other", bundle.other)
 
 
+def _continuity_version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("continuity")
+    except PackageNotFoundError:  # pragma: no cover - only on a broken checkout
+        return "0+unknown"
+
+
+def cmd_export(args: argparse.Namespace) -> None:
+    """Emit a continuity.declaration_export.v0: declared refs with quoted statuses.
+
+    Deliberately humiliating — it quotes Continuity's statuses, it does not assert
+    authority/recency. The export_id digests the declarations only (deterministic);
+    exported_at is resolved here at the boundary, not in the builder.
+    """
+    from continuity.util.clock import isoformat_now
+
+    store = _get_store(args)
+    status = None if args.status == "any" else args.status
+    req = QueryMemoryRequest(
+        scope=args.scope,
+        status=status,
+        include_expired=args.include_expired,
+        limit=args.limit,
+        offset=args.offset,
+    )
+    resp = store.query_memory(req)
+
+    source = ExportSource(
+        version=_continuity_version(),
+        repo=args.repo,
+        commit=args.commit,
+    )
+    export, excluded = build_declaration_export(
+        resp.items, exported_at=isoformat_now(), source=source,
+    )
+
+    print(json.dumps(export.canonical_dict(), indent=2, default=str))
+    if excluded:
+        print(
+            f"note: excluded {len(excluded)} memor"
+            f"{'y' if len(excluded) == 1 else 'ies'} with no locatable "
+            f"'ref' in content (not a declaration)",
+            file=sys.stderr,
+        )
+
+
 def cmd_stats(args: argparse.Namespace) -> None:
     store = _get_store(args)
     with store._connect() as conn:
@@ -1267,6 +1319,31 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # export — declaration export (a consumer locates/packages these; not authority)
+    p_exp_decl = sub.add_parser(
+        "export",
+        help=(
+            "emit a continuity.declaration_export.v0: declared refs with quoted "
+            "statuses. Quotes Continuity's status, does not confer authority/recency. "
+            "A consumer (e.g. the Spine read plane) locates and packages these."
+        ),
+    )
+    p_exp_decl.add_argument("--scope", default=None, help="restrict to a scope")
+    p_exp_decl.add_argument(
+        "--status", default="committed",
+        choices=["observed", "committed", "revoked", "any"],
+        help="status filter (default: committed; pass 'any' to skip filter)",
+    )
+    p_exp_decl.add_argument("--include-expired", action="store_true")
+    p_exp_decl.add_argument("--limit", type=int, default=1000)
+    p_exp_decl.add_argument("--offset", type=int, default=0)
+    p_exp_decl.add_argument(
+        "--repo", default=None, help="optional export provenance: source repo",
+    )
+    p_exp_decl.add_argument(
+        "--commit", default=None, help="optional export provenance: source commit",
+    )
+
     # stats
     sub.add_parser("stats", help="show database statistics")
 
@@ -1328,6 +1405,7 @@ COMMANDS = {
     "explain": cmd_explain,
     "latest": cmd_latest,
     "case": cmd_case,
+    "export": cmd_export,
     "stats": cmd_stats,
     "doctor": cmd_doctor,
 }
