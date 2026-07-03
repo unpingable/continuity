@@ -9,6 +9,7 @@ A map of this directory. Start from the top if you're new.
 3. [`integrations.md`](integrations.md) — how to talk to continuity (MCP, CLI, library)
 4. [`scoping.md`](scoping.md) — when to write to continuity, and at what weight
 5. [`gaps/`](gaps/) — proposed doctrine for architectural shifts
+6. [`ROADMAP.md`](ROADMAP.md) — where continuity stands, what's next, and in what order
 
 ## Contents
 
