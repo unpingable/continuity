@@ -48,14 +48,19 @@ Always run tests before proposing commits. Never claim tests pass without runnin
 continuity/
   src/continuity/
     api/models.py        — Pydantic domain models, enums, request/response
-    store/schema.sql     — SQLite schema (5 tables)
+    store/schema.sql     — SQLite schema (6 tables incl. store_metadata)
     store/sqlite.py      — SQLiteStore (observe, commit, revoke, query, explain)
     memory/policy.py     — MemoryPolicy (Governor seam)
-    receipts/            — Receipt shapes (WLP-compatible, future)
-    ingest/              — Spool import, WLP import (future)
-    util/                — clock, hashing, ids, jsoncanon
+    receipts/            — Receipt envelope (continuity.receipt.v0)
+    adapters/            — WLP persistence adapter
+    declaration_export.py — continuity.declaration_export.v0 builder
+    doctor/              — doctor checks (premise consistency)
+    mcp.py               — MCP server (12 tools over JSON-RPC/stdio)
+    cli.py               — contctl
+    ingest/              — Spool import, WLP import (placeholder, empty)
+    util/                — clock, hashing, ids, jsoncanon, dbpath
   tests/                 — pytest suite
-  docs/                  — Architecture docs (future)
+  docs/                  — concepts, integrations, scoping, ROADMAP, gaps/, candidates/
 ```
 
 ---

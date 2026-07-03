@@ -106,8 +106,8 @@ contctl query --scope myproject --status committed
 |------|-------------|
 | `src/continuity/store/sqlite.py` | The store — observe, commit, revoke, query, explain |
 | `src/continuity/api/models.py` | Domain models, enums, request/response types |
-| `src/continuity/store/schema.sql` | SQLite schema (5 tables) |
-| `src/continuity/mcp.py` | MCP server (7 tools over JSON-RPC/stdio) |
+| `src/continuity/store/schema.sql` | SQLite schema (6 tables) |
+| `src/continuity/mcp.py` | MCP server (12 tools over JSON-RPC/stdio) |
 | `src/continuity/memory/policy.py` | Governor policy seam |
 | `tests/` | Lifecycle, idempotency, query, receipts, rely gate |
 

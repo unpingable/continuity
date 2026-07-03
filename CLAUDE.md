@@ -31,7 +31,7 @@ pytest
 ## Project Structure
 
 - `src/continuity/api/models.py` — Pydantic domain models, enums, request/response types
-- `src/continuity/store/schema.sql` — SQLite schema (5 tables: memory_objects, memory_events, receipts, memory_links, spool_imports)
+- `src/continuity/store/schema.sql` — SQLite schema (6 tables: memory_objects, memory_events, receipts, memory_links, spool_imports, store_metadata)
 - `src/continuity/store/sqlite.py` — SQLiteStore (observe, commit, revoke, query, explain)
 - `src/continuity/memory/policy.py` — MemoryPolicy (Governor seam)
 - `src/continuity/util/` — clock, hashing, ids, jsoncanon
