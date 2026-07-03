@@ -82,3 +82,25 @@ standing. The export is the envelope; the verdict stays out of it.
 
 Implementation: `src/continuity/declaration_export.py`; tests:
 `tests/test_declaration_export.py`.
+
+## Consumer reconciliation (Spine, recorded 2026-07-03)
+
+Spine's Slice 2b fixture (`spine/src/spine/continuity_fixture.py`,
+`tests/fixtures/continuity_export_shape_v0.json`) **predates this contract**. It was
+modeled on Continuity `@ aab46ec` — before `contctl export` existed — and consumes a
+raw JSON list of `continuity.receipt.v0` envelopes, locating each ref via
+`payload.content.repo` + `payload.content.path`. This contract instead emits a single
+envelope with `declarations[]`, each carrying `ref` + `path` and a quoted
+`source_status`.
+
+The mismatch is bounded and known, not a defect in either repo: 2b's job was to prove
+Spine could consume a Continuity-*shaped* export with zero dependency on this package,
+and it did. Spine Slice 2c (not started) writes the real `DeclarationSource` against
+*this* schema and retires the fixture assumption. Continuity's side of that work is a
+golden conformance fixture — a deterministic sample export checked in where Spine can
+vendor it, the same way the 2b fixture was vendored (tracked in `docs/ROADMAP.md`,
+near-term slice 2). Spine additionally needs its own `build_edition` refactor
+(bytes-from-source instead of manifest-file path) — their named forcing case for 2c,
+no Continuity change implied.
+
+Retire this section when 2c lands.
