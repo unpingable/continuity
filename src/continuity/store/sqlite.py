@@ -50,6 +50,8 @@ from continuity.api.models import (
     ReceiptRecord,
     ReceiptType,
     RelianceClass,
+    RelyReasonCode,
+    RelyState,
     RepairMemoryRequest,
     RepairMemoryResponse,
     RevokeMemoryRequest,
@@ -570,11 +572,12 @@ class SQLiteStore:
 
             items: list[CaseItem] = []
             for m in memories:
-                rely_ok, rely_reason = self._compute_rely_state(
-                    conn, m, evaluation_time,
-                )
+                rs = self._compute_rely_state(conn, m, evaluation_time)
                 items.append(CaseItem(
-                    memory=m, rely_ok=rely_ok, rely_reason=rely_reason,
+                    memory=m,
+                    rely_ok=rs.rely_ok,
+                    rely_reason=rs.message,
+                    rely_state=rs,
                 ))
 
         bundle = CaseBundle(scope=req.scope, total_memories=len(items))
@@ -760,9 +763,7 @@ class SQLiteStore:
 
             premises = self._load_premises(conn, memory_id)
             dependents = self._load_dependents(conn, memory_id)
-            rely_ok, rely_reason = self._compute_rely_state(
-                conn, memory, evaluation_time,
-            )
+            rs = self._compute_rely_state(conn, memory, evaluation_time)
             imported = self._imported_premise_statuses(
                 conn, premises, evaluation_time,
             )
@@ -773,8 +774,9 @@ class SQLiteStore:
             receipts=[self._row_to_receipt(r) for r in receipt_rows],
             premises=premises,
             dependents=dependents,
-            rely_ok=rely_ok,
-            rely_reason=rely_reason,
+            rely_ok=rs.rely_ok,
+            rely_reason=rs.message,
+            rely_state=rs,
             evaluation_time=evaluation_time,
             imported_premises=imported,
         )
@@ -1464,34 +1466,70 @@ class SQLiteStore:
         conn: sqlite3.Connection,
         memory: MemoryObject,
         evaluation_time: datetime,
-    ) -> tuple[bool, str]:
+    ) -> RelyState:
         # evaluation_time is required — the kernel never reads the wall clock.
         # The boundary (explain/query/case) resolves the default via utcnow()
         # exactly once and flows it down explicitly so historical rely is
         # reconstructible (per docs/gaps/CONTINUITY_TIME_DISCIPLINE.md).
+        #
+        # Each branch returns a RelyState: a machine code, typed details, and a
+        # rendered message. The message strings are held identical to their
+        # pre-structuring form on purpose — flat rely_reason consumers must see
+        # the same text (per USEFUL_REFUSAL_EXPLAIN invariant 5).
         if memory.status != MemoryStatus.COMMITTED:
-            return False, f"memory status is {memory.status}, not committed"
+            return RelyState(
+                rely_ok=False,
+                code=RelyReasonCode.STATUS_NOT_COMMITTED,
+                message=f"memory status is {memory.status}, not committed",
+                details={"status": str(memory.status)},
+            )
 
         if memory.expires_at is not None:
             eval_iso = to_isoformat(evaluation_time)
             exp_iso = to_isoformat(memory.expires_at)
             if exp_iso and eval_iso and eval_iso >= exp_iso:
-                return False, "memory is expired"
+                return RelyState(
+                    rely_ok=False,
+                    code=RelyReasonCode.EXPIRED,
+                    message="memory is expired",
+                    details={"expires_at": exp_iso, "evaluation_time": eval_iso},
+                )
 
         if memory.reliance_class == RelianceClass.NONE:
-            return False, "reliance_class=none"
+            return RelyState(
+                rely_ok=False,
+                code=RelyReasonCode.RELIANCE_NONE,
+                message="reliance_class=none",
+                details={"reliance_class": str(memory.reliance_class)},
+            )
 
         if (
             memory.kind in {MemoryKind.SUMMARY, MemoryKind.HYPOTHESIS}
             and memory.reliance_class == RelianceClass.ACTIONABLE
         ):
-            return False, f"{memory.kind} cannot be actionable by default"
+            return RelyState(
+                rely_ok=False,
+                code=RelyReasonCode.KIND_BASIS_POLICY,
+                message=f"{memory.kind} cannot be actionable by default",
+                details={
+                    "kind": str(memory.kind),
+                    "requested_class": str(memory.reliance_class),
+                },
+            )
 
         if (
             memory.basis in {Basis.INFERENCE, Basis.SYNTHESIS}
             and memory.reliance_class == RelianceClass.ACTIONABLE
         ):
-            return False, f"basis={memory.basis} cannot be actionable by default"
+            return RelyState(
+                rely_ok=False,
+                code=RelyReasonCode.KIND_BASIS_POLICY,
+                message=f"basis={memory.basis} cannot be actionable by default",
+                details={
+                    "basis": str(memory.basis),
+                    "requested_class": str(memory.reliance_class),
+                },
+            )
 
         # Check hard premises
         hard_rows = conn.execute(
@@ -1517,9 +1555,19 @@ class SQLiteStore:
                 bad.append(f"{src_id}:revoked")
 
         if bad:
-            return False, f"hard premises unavailable: {', '.join(bad)}"
+            return RelyState(
+                rely_ok=False,
+                code=RelyReasonCode.HARD_PREMISE_UNAVAILABLE,
+                message=f"hard premises unavailable: {', '.join(bad)}",
+                details={"bad_premises": bad},
+            )
 
-        return True, f"eligible for reliance at class {memory.reliance_class}"
+        return RelyState(
+            rely_ok=True,
+            code=RelyReasonCode.ELIGIBLE,
+            message=f"eligible for reliance at class {memory.reliance_class}",
+            details={"reliance_class": str(memory.reliance_class)},
+        )
 
     # ------------------------------------------------------------------
     # Internal DB helpers

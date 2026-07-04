@@ -1,6 +1,6 @@
 # Gap: Useful Refusal — structured rely_reason for machine-consumable refusal
 
-**Status:** proposed
+**Status:** V1 implemented (`RelyReasonCode` + `RelyState`, `contctl why`; tests in `tests/test_useful_refusal.py`)
 **Depends on:** existing `_compute_rely_state` machinery
 **Related:** none yet; downstream consumers (Governor refusal surfaces, CLI `why` command, future TUI) will benefit
 **Last updated:** 2026-04-24

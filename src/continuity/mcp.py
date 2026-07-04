@@ -860,6 +860,14 @@ class ContinuityMCPServer:
             },
             "rely_ok": resp.rely_ok,
             "rely_reason": resp.rely_reason,
+            "rely_state": (
+                {
+                    "code": resp.rely_state.code,
+                    "message": resp.rely_state.message,
+                    "details": resp.rely_state.details,
+                }
+                if resp.rely_state is not None else None
+            ),
             "evaluation_time": (
                 resp.evaluation_time.isoformat()
                 if resp.evaluation_time is not None else None

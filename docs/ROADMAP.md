@@ -56,13 +56,15 @@ Spine's.
    `DECLARATION_EXPORT_V0.md` once 2c lands. The Spine-side adapter and `build_edition`
    refactor are Spine's work, not continuity's.
 
-3. **USEFUL_REFUSAL_EXPLAIN V1** —
-   [`gaps/USEFUL_REFUSAL_EXPLAIN.md`](gaps/USEFUL_REFUSAL_EXPLAIN.md): promote
-   `rely_reason` from free-form string to a structured `RelyReasonCode` + details +
-   rendered message, plus `contctl why`. Sequenced *before* the authoring-tier slice so
-   tier-cap refusals land structured from day one instead of being retrofitted.
-   Constraint inherited from the pinned surface: `rely_reason` stays str-renderable
-   (agent_gov does `str(explained.rely_reason)` into gate receipts).
+3. **USEFUL_REFUSAL_EXPLAIN V1** — **landed 2026-07-03.**
+   [`gaps/USEFUL_REFUSAL_EXPLAIN.md`](gaps/USEFUL_REFUSAL_EXPLAIN.md): `RelyReasonCode`
+   enum + `RelyState` (code + details + message), threaded additively through
+   `explain`, case bundles, and the MCP explain payload, plus `contctl why` (verdict +
+   code + specifics, non-zero exit on refusal). The flat `rely_ok`/`rely_reason` fields
+   are derived from `rely_state` and unchanged, honoring the pinned-surface constraint
+   (`rely_reason` stays str-renderable; agent_gov does `str(explained.rely_reason)`).
+   Sequenced before the authoring-tier slice so tier-cap refusals land structured from
+   day one. `tests/test_useful_refusal.py`.
 
 4. **MEMORY_AUTHORING_TIER V1** —
    [`gaps/MEMORY_AUTHORING_TIER_GAP.md`](gaps/MEMORY_AUTHORING_TIER_GAP.md): the

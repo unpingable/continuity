@@ -73,6 +73,24 @@ class RelianceClass(StrEnum):
     ACTIONABLE = "actionable"
 
 
+class RelyReasonCode(StrEnum):
+    """Machine-consumable category for a rely decision.
+
+    One code per discrete check in the rely gate, so a downstream consumer can
+    route on the category (log / surface / retry / escalate) without parsing the
+    human string. Codes are additive: new categories may be appended, existing
+    ones never change meaning or get renamed, and consumers switch on known
+    codes and fall through on unknown. See docs/gaps/USEFUL_REFUSAL_EXPLAIN.md.
+    """
+
+    ELIGIBLE = "eligible"                             # rely_ok=true
+    STATUS_NOT_COMMITTED = "status_not_committed"     # observed/revoked
+    EXPIRED = "expired"                               # past expires_at
+    RELIANCE_NONE = "reliance_none"                   # committed but class=none
+    KIND_BASIS_POLICY = "kind_basis_policy"           # kind/basis forbids the class
+    HARD_PREMISE_UNAVAILABLE = "hard_premise_unavailable"  # premise missing/revoked
+
+
 class EventType(StrEnum):
     OBSERVE = "observe"
     COMMIT = "commit"
@@ -634,6 +652,20 @@ class ImportedPremiseStatus(JsonModel):
     imported_at: datetime | None = None
 
 
+class RelyState(JsonModel):
+    """Structured rely decision: a category code, typed details, and the rendered
+    human message. ``rely_ok`` + ``message`` mirror the flat fields kept on the
+    responses for backward compatibility; ``code`` + ``details`` are what a
+    consumer branches on. ``details`` carries the specifics that used to be
+    embedded in prose — offending premise ids, the expiry timestamp, the
+    class/kind/basis that tripped the gate. See USEFUL_REFUSAL_EXPLAIN."""
+
+    rely_ok: bool
+    code: RelyReasonCode
+    message: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class ExplainMemoryResponse(JsonModel):
     memory: MemoryObject
     events: list[MemoryEvent]
@@ -642,6 +674,11 @@ class ExplainMemoryResponse(JsonModel):
     dependents: list[MemoryLink] = Field(default_factory=list)
     rely_ok: bool
     rely_reason: str
+    # Structured form of the rely decision (code + details + message). The flat
+    # rely_ok / rely_reason fields above are derived from this and kept for
+    # compatibility (rely_reason == rely_state.message). Additive per
+    # USEFUL_REFUSAL_EXPLAIN; existing consumers ignore it.
+    rely_state: RelyState | None = None
     # The wall-clock moment used to compute rely_ok / expiry. Captured so
     # an audit can reconstruct the decision context. Per the time-discipline
     # gap: any clock read that affects whether memory binds must be explicit
@@ -668,6 +705,9 @@ class CaseItem(JsonModel):
     memory: MemoryObject
     rely_ok: bool
     rely_reason: str
+    # Structured rely decision; rely_ok / rely_reason are derived from it and
+    # kept flat for compatibility. Additive per USEFUL_REFUSAL_EXPLAIN.
+    rely_state: RelyState | None = None
 
 
 class CaseBundle(JsonModel):

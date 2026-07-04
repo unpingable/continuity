@@ -748,6 +748,37 @@ def cmd_explain(args: argparse.Namespace) -> None:
     _out(resp)
 
 
+def cmd_why(args: argparse.Namespace) -> None:
+    """Render the rely decision operator-forward: verdict + code + specifics first.
+
+    Same data as `explain`, but focused on the one question an operator asks at
+    the boundary — may I rely on this, and if not, exactly why? Structured
+    details (offending premises, expiry, class mismatch) lead; supporting prose
+    follows. --json emits the RelyState for scripting.
+    """
+    store = _get_store(args)
+    evaluation_time = _parse_cli_evaluation_time(args.evaluation_time)
+    resp = store.explain_memory(
+        args.memory_id, evaluation_time=evaluation_time,
+    )
+    state = resp.rely_state
+
+    if args.json:
+        _out(state)
+        return
+
+    verdict = "RELY OK" if resp.rely_ok else "REFUSED"
+    code = state.code if state is not None else "(unknown)"
+    print(f"{verdict}  [{code}]  {args.memory_id}")
+    print(f"  {resp.rely_reason}")
+    if state is not None and state.details:
+        print("  details:")
+        for key, value in state.details.items():
+            print(f"    {key}: {value}")
+    if not resp.rely_ok:
+        sys.exit(1)
+
+
 def _parse_cli_evaluation_time(value: str | None) -> "datetime | None":
     """Parse --evaluation-time into a tz-aware datetime; passthrough None."""
     if value is None:
@@ -1263,6 +1294,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # why — operator-forward rely verdict (code + specifics first)
+    p_why = sub.add_parser(
+        "why",
+        help="why may/can't I rely on this memory? (rely code + specifics)",
+    )
+    p_why.add_argument("memory_id")
+    p_why.add_argument("--json", action="store_true", help="emit the RelyState as JSON")
+    p_why.add_argument(
+        "--evaluation-time", default=None,
+        help=(
+            "ISO-8601 timestamp; compute the rely decision as of that moment "
+            "(historical replay). Defaults to current wall clock."
+        ),
+    )
+
     # latest
     p_latest = sub.add_parser(
         "latest",
@@ -1403,6 +1449,7 @@ COMMANDS = {
     "reliance": cmd_reliance,
     "query": cmd_query,
     "explain": cmd_explain,
+    "why": cmd_why,
     "latest": cmd_latest,
     "case": cmd_case,
     "export": cmd_export,
