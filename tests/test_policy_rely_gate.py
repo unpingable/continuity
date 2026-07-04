@@ -8,6 +8,8 @@ This is the test that proves the thesis:
 
 from continuity.api.models import (
     ActorRef,
+    AdjudicateMemoryRequest,
+    AdjudicationMotion,
     Basis,
     CommitMemoryRequest,
     MemoryKind,
@@ -216,15 +218,23 @@ def test_policy_blocks_inference_actionable(store: SQLiteStore) -> None:
         content={"fact": "inferred from logs"},
     ))
 
-    # Operator approves the commit; rely-time check is the gate for
-    # inference+actionable (see _compute_rely_state and allow_rely below).
+    # Agent-authored inference caps at advisory, so commit it there first, then
+    # custody-promote to custodian_signed + actionable (the only tier whose cap
+    # permits actionable). Even then, the rely-time basis check blocks
+    # inference+actionable — the gate this test pins.
     store.commit_memory(CommitMemoryRequest(
         memory_id=obs.memory.memory_id,
+        reliance_class=RelianceClass.ADVISORY,
+    ))
+    promoted = store.adjudicate_memory(AdjudicateMemoryRequest(
+        memory_id=obs.memory.memory_id,
+        motion=AdjudicationMotion.REAFFIRM,
+        custody_record={"custodian": "operator:test", "sig": "x"},
         reliance_class=RelianceClass.ACTIONABLE,
-        approved_by=_operator(),
+        actor=_operator(),
     ))
 
-    memory = store.get_memory(obs.memory.memory_id)
+    memory = store.get_memory(promoted.memory.memory_id)
     policy = MemoryPolicy()
     result = policy.allow_rely(memory)
     assert not result.allowed

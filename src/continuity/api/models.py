@@ -89,6 +89,78 @@ class RelyReasonCode(StrEnum):
     RELIANCE_NONE = "reliance_none"                   # committed but class=none
     KIND_BASIS_POLICY = "kind_basis_policy"           # kind/basis forbids the class
     HARD_PREMISE_UNAVAILABLE = "hard_premise_unavailable"  # premise missing/revoked
+    AUTHORING_TIER_CAPPED = "authoring_tier_capped"   # tier cap forced effective=none
+
+
+class AuthoringTier(StrEnum):
+    """Who authored a memory, and what force it is allowed to have later.
+
+    Distinct from ``basis`` (how the claim was formed) and ``reliance_class``
+    (what may be relied on): tier answers *who is allowed to make it binding*.
+    It upper-bounds reliance_class — see :func:`tier_cap`. The dangerous failure
+    continuity guards is not forgetting but remembering wrong *as policy*;
+    agent-authored content must not acquire binding force merely by persisting.
+    See docs/gaps/MEMORY_AUTHORING_TIER_GAP.md.
+    """
+
+    AGENT_AUTHORED = "agent_authored"          # running agent / LLM / model session
+    RUNTIME_AUTHORED = "runtime_authored"      # tool / sensor, no semantic discretion
+    CUSTODIAN_SIGNED = "custodian_signed"      # written under an explicit custody event
+    REVOKED = "revoked"                        # author's standing ended; history only
+    PROVENANCE_UNKNOWN = "provenance_unknown"  # honest backfill for pre-doctrine rows
+
+
+# Total order on reliance classes, weakest first — so min()/comparison can
+# express "the weaker of stored and cap." Not stored on the enum itself to keep
+# RelianceClass a plain StrEnum.
+_RELIANCE_ORDER: tuple[RelianceClass, ...] = (
+    RelianceClass.NONE,
+    RelianceClass.RETRIEVE_ONLY,
+    RelianceClass.ADVISORY,
+    RelianceClass.ACTIONABLE,
+)
+
+
+# The cap each authoring tier places on reliance_class. A row may be *stored* at
+# any class it was committed with, but it may never be *relied on* above its
+# tier cap. Enforced at write (refuse over-cap commits) and re-applied at read
+# (effective_reliance). This table is the anti-laundering invariant in one place.
+_TIER_CAP: dict[AuthoringTier, RelianceClass] = {
+    AuthoringTier.PROVENANCE_UNKNOWN: RelianceClass.RETRIEVE_ONLY,
+    AuthoringTier.AGENT_AUTHORED: RelianceClass.ADVISORY,
+    AuthoringTier.RUNTIME_AUTHORED: RelianceClass.ADVISORY,
+    AuthoringTier.CUSTODIAN_SIGNED: RelianceClass.ACTIONABLE,
+    AuthoringTier.REVOKED: RelianceClass.NONE,
+}
+
+
+def tier_cap(tier: AuthoringTier | str) -> RelianceClass:
+    """The maximum reliance_class an entry of this authoring tier may be relied on at."""
+    return _TIER_CAP[AuthoringTier(tier)]
+
+
+def reliance_min(a: RelianceClass | str, b: RelianceClass | str) -> RelianceClass:
+    """The weaker of two reliance classes under the total order."""
+    ia = _RELIANCE_ORDER.index(RelianceClass(a))
+    ib = _RELIANCE_ORDER.index(RelianceClass(b))
+    return _RELIANCE_ORDER[min(ia, ib)]
+
+
+def reliance_exceeds(requested: RelianceClass | str, cap: RelianceClass | str) -> bool:
+    """True if ``requested`` is stronger than ``cap`` (an over-cap request)."""
+    return _RELIANCE_ORDER.index(RelianceClass(requested)) > _RELIANCE_ORDER.index(
+        RelianceClass(cap)
+    )
+
+
+def effective_reliance(
+    reliance_class: RelianceClass | str, authoring_tier: AuthoringTier | str,
+) -> RelianceClass:
+    """The reliance class an entry may actually be relied on at: min(stored, cap).
+
+    Pure and DB-free — the tier cap is definitional, so a read surface can
+    surface the effective ceiling without a rely computation."""
+    return reliance_min(reliance_class, tier_cap(authoring_tier))
 
 
 class EventType(StrEnum):
@@ -283,6 +355,12 @@ class MemoryObject(JsonModel):
     basis: Basis
     status: MemoryStatus = MemoryStatus.OBSERVED
     reliance_class: RelianceClass = RelianceClass.NONE
+    # Who authored this, and thus the ceiling on how much it may be relied on.
+    # Defaults to agent_authored — the honest label for LLM-driven writes, and
+    # safe because it caps at advisory (never actionable). custodian_signed is
+    # never self-declarable via a routine write; provenance_unknown is the
+    # backfill/import label. See MEMORY_AUTHORING_TIER_GAP.
+    authoring_tier: AuthoringTier = AuthoringTier.AGENT_AUTHORED
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
     content: dict[str, Any] = Field(default_factory=dict)
@@ -338,6 +416,12 @@ class MemoryEvent(JsonModel):
 
     receipt_id: str = Field(..., min_length=8, max_length=80)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    # Authoring tier at the time of this event (audit trail for tier over time).
+    authoring_tier: AuthoringTier | None = None
+    # Reserved for the future NQ witness edge (invariant 11). V1 never
+    # populates it; naming the column now avoids a retrofit when NQ lands.
+    external_witness_ref: str | None = Field(default=None, max_length=255)
 
     created_at: datetime = Field(default_factory=utcnow)
     idempotency_key: str | None = Field(default=None, max_length=255)
@@ -397,6 +481,11 @@ class ObserveMemoryRequest(JsonModel):
     supersedes: str | None = Field(default=None, max_length=80)
     actor: ActorRef | None = None
     standing: StandingRef | None = None
+    # Declared authoring tier. None resolves to agent_authored at the write
+    # boundary. agent_authored / runtime_authored are accepted; custodian_signed,
+    # revoked, and provenance_unknown are refused on a routine write (custody
+    # promotion goes through adjudicate; the others are derived/backfill labels).
+    authoring_tier: AuthoringTier | None = None
     idempotency_key: str | None = Field(default=None, max_length=255)
 
 
@@ -416,6 +505,12 @@ class CommitMemoryRequest(JsonModel):
     expires_at: datetime | None = None
     note: str | None = Field(default=None, max_length=4000)
     premises: list[PremiseRef] = Field(default_factory=list)
+    # Optionally restate the authoring tier at commit (e.g. a runtime committing
+    # its own observation). None keeps the observe-time tier. Same refusal as
+    # observe: custodian_signed / revoked / provenance_unknown are not
+    # self-declarable here. The committed reliance_class must not exceed the
+    # tier cap (enforced at commit; re-applied at rely).
+    authoring_tier: AuthoringTier | None = None
     idempotency_key: str | None = Field(default=None, max_length=255)
 
 
@@ -439,6 +534,50 @@ class RevokeMemoryResponse(JsonModel):
     memory: MemoryObject
     event: MemoryEvent
     receipt: ReceiptRecord
+
+
+class AdjudicationMotion(StrEnum):
+    """How a custodian adjudicates a memory's authoring tier / standing."""
+
+    REAFFIRM = "reaffirm"   # custody promotion: mint a custodian_signed successor
+    RETIRE = "retire"       # explicit revocation: becomes history
+
+
+class AdjudicateMemoryRequest(JsonModel):
+    """A custodian's adjudication of a memory (MEMORY_AUTHORING_TIER §9).
+
+    `reaffirm` is the ONLY legitimate path to custodian_signed: it mints a new
+    memory object (superseding the original) under an attached custody record,
+    so custodian_signed is never self-declarable via a routine write (invariant
+    8). `retire` revokes the memory as history. The signing mechanism is opaque
+    to the substrate — `custody_record` is stored verbatim and referenced by the
+    resulting commit event id (invariant 8, deferred crypto)."""
+
+    memory_id: str = Field(..., min_length=8, max_length=80)
+    motion: AdjudicationMotion
+    # Required for reaffirm: the custody attestation (opaque to the substrate).
+    custody_record: dict[str, Any] | None = None
+    # The reliance class the reaffirmed (custodian_signed) successor is committed
+    # at — may be up to actionable, since custodian_signed caps at actionable.
+    reliance_class: RelianceClass = RelianceClass.ADVISORY
+    reason: str | None = Field(default=None, max_length=4000)
+    actor: ActorRef | None = None
+    standing: StandingRef | None = None
+    idempotency_key: str | None = Field(default=None, max_length=255)
+
+    @model_validator(mode="after")
+    def validate_motion(self) -> AdjudicateMemoryRequest:
+        if self.motion == AdjudicationMotion.REAFFIRM and not self.custody_record:
+            raise ValueError("reaffirm requires a custody_record")
+        return self
+
+
+class AdjudicateMemoryResponse(JsonModel):
+    memory: MemoryObject
+    event: MemoryEvent
+    receipt: ReceiptRecord
+    # For reaffirm: the original memory this custodian_signed entry supersedes.
+    superseded_memory_id: str | None = None
 
 
 class RepairMemoryRequest(JsonModel):

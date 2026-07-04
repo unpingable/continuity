@@ -2,6 +2,8 @@
 
 from continuity.api.models import (
     ActorRef,
+    AdjudicateMemoryRequest,
+    AdjudicationMotion,
     Basis,
     CommitMemoryRequest,
     GetCaseRequest,
@@ -142,10 +144,10 @@ def test_case_includes_revoked_items(store: SQLiteStore) -> None:
 
 def test_case_items_carry_rely_state(store: SQLiteStore) -> None:
     scope = "case:rely-state"
-    fact_id = _observe(store, scope, MemoryKind.FACT, {"text": "actionable fact"})
+    fact_id = _observe(store, scope, MemoryKind.FACT, {"text": "advisory fact"})
     store.commit_memory(CommitMemoryRequest(
         memory_id=fact_id,
-        reliance_class=RelianceClass.ACTIONABLE,
+        reliance_class=RelianceClass.ADVISORY,
         approved_by=_operator(),
     ))
 
@@ -155,7 +157,7 @@ def test_case_items_carry_rely_state(store: SQLiteStore) -> None:
 
     by_id = {item.memory.memory_id: item for item in bundle.facts}
     assert by_id[fact_id].rely_ok is True
-    assert "actionable" in by_id[fact_id].rely_reason
+    assert "advisory" in by_id[fact_id].rely_reason
     assert by_id[observed_id].rely_ok is False
     assert "not committed" in by_id[observed_id].rely_reason
 
@@ -178,18 +180,25 @@ def test_case_summary_remains_non_actionable(store: SQLiteStore) -> None:
     # advisory is allowed for summary; actionable is not
     assert bundle.summary.rely_ok is True
 
-    # Even with operator approval at commit time, summary cannot be
-    # actionable — the rely-time check in _compute_rely_state enforces it.
+    # Even when custody-promoted all the way to custodian_signed + actionable
+    # (the only tier whose cap permits actionable), a summary still cannot be
+    # relied on as actionable — the rely-time kind check enforces it on top of
+    # the tier cap.
     summary_id2 = _observe(store, scope, MemoryKind.SUMMARY, {"title": "v2"})
     store.commit_memory(CommitMemoryRequest(
         memory_id=summary_id2,
-        reliance_class=RelianceClass.ACTIONABLE,
-        approved_by=_operator(),
+        reliance_class=RelianceClass.ADVISORY,
     ))
-    bundle2 = store.get_case(GetCaseRequest(scope=scope))
-    assert bundle2.summary is not None
-    assert bundle2.summary.rely_ok is False
-    assert "summary" in bundle2.summary.rely_reason
+    promoted = store.adjudicate_memory(AdjudicateMemoryRequest(
+        memory_id=summary_id2,
+        motion=AdjudicationMotion.REAFFIRM,
+        custody_record={"custodian": "operator:jbeck", "sig": "test"},
+        reliance_class=RelianceClass.ACTIONABLE,
+        actor=_operator(),
+    ))
+    explained = store.explain_memory(promoted.memory.memory_id)
+    assert explained.rely_ok is False
+    assert "summary" in explained.rely_reason
 
 
 def test_case_chronological_order(store: SQLiteStore) -> None:
@@ -235,7 +244,7 @@ def test_case_record_relations(store: SQLiteStore) -> None:
     # Commit the fact with a confirmed_by link to the experiment
     store.commit_memory(CommitMemoryRequest(
         memory_id=fact_id,
-        reliance_class=RelianceClass.ACTIONABLE,
+        reliance_class=RelianceClass.ADVISORY,
         approved_by=_operator(),
         premises=[PremiseRef(
             memory_id=experiment_id,

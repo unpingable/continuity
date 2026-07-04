@@ -227,8 +227,8 @@ def test_default_policy_denies_actionable_without_approver(tmp_path) -> None:
     assert excinfo.value.refusal_receipt.content["intended_event"] == "commit"
 
 
-def test_default_policy_allows_actionable_with_approver(tmp_path) -> None:
-    """Default policy: ACTIONABLE with approved_by passes the commit gate."""
+def test_default_policy_allows_advisory_with_approver(tmp_path) -> None:
+    """Default policy: an agent_authored memory commits at advisory (its cap)."""
     db = tmp_path / "default-ok.db"
     store = SQLiteStore(db)
     store.initialize()
@@ -237,15 +237,40 @@ def test_default_policy_allows_actionable_with_approver(tmp_path) -> None:
         scope="default-policy-ok",
         kind=MemoryKind.FACT,
         basis=Basis.DIRECT_CAPTURE,
-        content={"fact": "actionable and signed"},
+        content={"fact": "advisory and signed"},
     ))
 
     resp = store.commit_memory(CommitMemoryRequest(
         memory_id=obs.memory.memory_id,
-        reliance_class=RelianceClass.ACTIONABLE,
+        reliance_class=RelianceClass.ADVISORY,
         approved_by=_operator(),
     ))
-    assert resp.memory.reliance_class == "actionable"
+    assert resp.memory.reliance_class == "advisory"
+
+
+def test_agent_authored_actionable_is_refused_by_cap(tmp_path) -> None:
+    """Actionable now requires custodian_signed: operator approval alone no
+    longer buys it. An agent_authored memory (the default) caps at advisory, so
+    an actionable commit is refused with a receipt (MEMORY_AUTHORING_TIER)."""
+    db = tmp_path / "cap-refuse.db"
+    store = SQLiteStore(db)
+    store.initialize()
+
+    obs = store.observe_memory(ObserveMemoryRequest(
+        scope="cap-refuse",
+        kind=MemoryKind.FACT,
+        basis=Basis.DIRECT_CAPTURE,
+        content={"fact": "wants to be actionable"},
+    ))
+
+    with pytest.raises(PolicyDeniedError) as exc:
+        store.commit_memory(CommitMemoryRequest(
+            memory_id=obs.memory.memory_id,
+            reliance_class=RelianceClass.ACTIONABLE,
+            approved_by=_operator(),
+        ))
+    assert "exceeds the cap" in str(exc.value)
+    assert exc.value.refusal_receipt is not None
 
 
 def test_denied_repair_leaves_refusal(tmp_path) -> None:

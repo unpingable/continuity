@@ -52,6 +52,7 @@ from continuity.api.models import (
     RevokeMemoryRequest,
     SourceRef,
     VerifyRelianceRequest,
+    effective_reliance,
 )
 from continuity.store.sqlite import (
     ContentHashMismatchError,
@@ -705,6 +706,7 @@ class ContinuityMCPServer:
             source_refs=source_refs,
             premises=premises,
             supersedes=args.get("supersedes"),
+            authoring_tier=args.get("authoring_tier"),
             actor=_mcp_actor(),
         )
 
@@ -712,6 +714,7 @@ class ContinuityMCPServer:
         return {
             "memory_id": resp.memory.memory_id,
             "status": resp.memory.status,
+            "authoring_tier": resp.memory.authoring_tier,
             "supersedes": resp.memory.supersedes,
             "receipt_id": resp.receipt.receipt_id,
             "receipt_hash": resp.receipt.hash,
@@ -734,6 +737,7 @@ class ContinuityMCPServer:
             note=args.get("note"),
             supersedes=args.get("supersedes"),
             premises=premises,
+            authoring_tier=args.get("authoring_tier"),
             approved_by=_mcp_actor(),
         )
 
@@ -742,6 +746,10 @@ class ContinuityMCPServer:
             "memory_id": resp.memory.memory_id,
             "status": resp.memory.status,
             "reliance_class": resp.memory.reliance_class,
+            "authoring_tier": resp.memory.authoring_tier,
+            "effective_reliance": effective_reliance(
+                resp.memory.reliance_class, resp.memory.authoring_tier,
+            ),
             "receipt_id": resp.receipt.receipt_id,
             "receipt_hash": resp.receipt.hash,
         }
@@ -830,6 +838,10 @@ class ContinuityMCPServer:
                     "basis": m.basis,
                     "status": m.status,
                     "reliance_class": m.reliance_class,
+                    "authoring_tier": m.authoring_tier,
+                    "effective_reliance": effective_reliance(
+                        m.reliance_class, m.authoring_tier,
+                    ),
                     "confidence": m.confidence,
                     "content": m.content,
                     "created_at": str(m.created_at),
@@ -841,7 +853,13 @@ class ContinuityMCPServer:
 
     def _handle_memory_get(self, args: dict[str, Any]) -> dict[str, Any]:
         memory = self.store.get_memory(args["memory_id"])
-        return memory.model_dump(mode="json")
+        payload = memory.model_dump(mode="json")
+        # authoring_tier is already in the dump; surface the effective reliance
+        # ceiling explicitly (read at tier, never above — MEMORY_AUTHORING_TIER).
+        payload["effective_reliance"] = effective_reliance(
+            memory.reliance_class, memory.authoring_tier,
+        )
+        return payload
 
     def _handle_memory_explain(self, args: dict[str, Any]) -> dict[str, Any]:
         evaluation_time = _parse_evaluation_time(args.get("evaluation_time"))

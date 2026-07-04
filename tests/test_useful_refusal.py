@@ -21,6 +21,8 @@ import pytest
 
 from continuity.api.models import (
     ActorRef,
+    AdjudicateMemoryRequest,
+    AdjudicationMotion,
     Basis,
     CommitMemoryRequest,
     GetCaseRequest,
@@ -99,10 +101,24 @@ def test_reliance_none_code(store: SQLiteStore) -> None:
     assert st.details["reliance_class"] == "none"
 
 
+def _promote_actionable(store, memory_id):
+    """Custody-promote to custodian_signed + actionable — the only path to an
+    actionable committed memory. Returns the successor's id."""
+    _commit(store, memory_id, RelianceClass.ADVISORY)
+    resp = store.adjudicate_memory(AdjudicateMemoryRequest(
+        memory_id=memory_id,
+        motion=AdjudicationMotion.REAFFIRM,
+        custody_record={"custodian": "operator:jbeck", "sig": "test"},
+        reliance_class=RelianceClass.ACTIONABLE,
+        actor=_operator(),
+    ))
+    return resp.memory.memory_id
+
+
 def test_kind_policy_code(store: SQLiteStore) -> None:
     mem = _observe(store, "why:kind", MemoryKind.SUMMARY, {"title": "t", "story": "s"})
-    _commit(store, mem.memory_id, RelianceClass.ACTIONABLE)
-    st = store.explain_memory(mem.memory_id).rely_state
+    promoted_id = _promote_actionable(store, mem.memory_id)
+    st = store.explain_memory(promoted_id).rely_state
     assert st.rely_ok is False
     assert st.code == RelyReasonCode.KIND_BASIS_POLICY
     assert st.details["kind"] == "summary"
@@ -112,8 +128,8 @@ def test_kind_policy_code(store: SQLiteStore) -> None:
 
 def test_basis_policy_code(store: SQLiteStore) -> None:
     mem = _observe(store, "why:basis", MemoryKind.FACT, {"x": 1}, basis=Basis.INFERENCE)
-    _commit(store, mem.memory_id, RelianceClass.ACTIONABLE)
-    st = store.explain_memory(mem.memory_id).rely_state
+    promoted_id = _promote_actionable(store, mem.memory_id)
+    st = store.explain_memory(promoted_id).rely_state
     assert st.rely_ok is False
     assert st.code == RelyReasonCode.KIND_BASIS_POLICY
     assert st.details["basis"] == "inference"

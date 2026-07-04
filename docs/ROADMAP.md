@@ -66,16 +66,19 @@ Spine's.
    Sequenced before the authoring-tier slice so tier-cap refusals land structured from
    day one. `tests/test_useful_refusal.py`.
 
-4. **MEMORY_AUTHORING_TIER V1** —
-   [`gaps/MEMORY_AUTHORING_TIER_GAP.md`](gaps/MEMORY_AUTHORING_TIER_GAP.md): the
-   doctrinal centerpiece. `authoring_tier` upper-bounds `reliance_class`, enforced at
-   write and re-applied at rely; migration backfills honestly as `provenance_unknown`;
-   standing-loss flips to `standing_contested` for explicit adjudication;
-   `external_witness_ref` reserved for the future NQ witness edge. The V1 slice is
-   fully enumerated in the spec (schema, cap table, read surfaces, doctor check,
-   adjudicate path, tests). Do it before usage spreads further: it adds
-   `authoring_tier` and `effective_reliance` to read payloads every consumer will see,
-   and retrofit cost rises with each new consumer. Additive against the pinned surface.
+4. **MEMORY_AUTHORING_TIER V1** — **landed 2026-07-04.**
+   [`gaps/MEMORY_AUTHORING_TIER_GAP.md`](gaps/MEMORY_AUTHORING_TIER_GAP.md) (see its
+   Implementation Notes for the deviations): the doctrinal centerpiece.
+   `authoring_tier` upper-bounds `reliance_class`, enforced at write (over-cap commits
+   refused) and re-applied at rely (`effective_reliance = min(stored, cap)`); the
+   schema migration backfills existing rows honestly as `provenance_unknown` (never a
+   false claim of agent authorship); custodian_signed is reachable only via
+   `contctl adjudicate --reaffirm` (the custody path); `contctl doctor --check
+   authoring-tier` flags cap violations and revoked-tier premises;
+   `external_witness_ref` reserved (unpopulated) for the future NQ edge. Additive
+   against the pinned surface — the flat `rely_ok`/`rely_reason` are unchanged, tier +
+   effective reliance ride alongside. `tests/test_authoring_tier.py` (+ MCP coverage).
+   `standing_contested` and automatic standing-loss detection remain deferred.
 
 ## Decide when triggered
 

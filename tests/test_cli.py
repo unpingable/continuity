@@ -205,7 +205,7 @@ def test_case_command_human(db_path: str) -> None:
     ])["memory_id"]
     run(db_path, [
         "commit", fact_id,
-        "--reliance-class", "actionable",
+        "--reliance-class", "advisory",
         "--actor", "operator:test",
     ])
 

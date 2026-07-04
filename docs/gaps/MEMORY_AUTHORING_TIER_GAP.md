@@ -1,6 +1,6 @@
 # Gap: Memory Authoring Tier — provenance distinct from reliance
 
-**Status:** proposed
+**Status:** V1 implemented 2026-07-04 (`tests/test_authoring_tier.py`) — see Implementation Notes below
 **Depends on:** None at the substrate layer (orthogonal to `CROSS_SCOPE_REFERENCE_GAP`).
 **Related:** Composes with `CROSS_COMPONENT_RELIANCE_GAP` (reliance shape at the cross-host layer — receipts gain a `tier_drift` status), `CONTINUITY_TIME_DISCIPLINE` (rely is replayable, so tier-cap must be re-checkable at replay), `PREMISE_CONSISTENCY_DOCTOR` (doctor seam for tier-violation detection follows the same shape). Doctrine source: the constellation map of 2026-06-03 (nine roles × four refusal kinds × mutation discipline per tier) and the keystone invariant *"no actor is authoritative over what it authors — including what it authors into its own past."*
 **Blocks:** any downstream consumer that needs to distinguish *can remind* from *can bind*. Today no such distinction exists in continuity. Wicket, Nightshift, Standing, and a future Governor cannot tell which memory entries carry binding force vs advisory force.
@@ -149,6 +149,62 @@ This gap is closed when:
 - A worked migration plan is included (this document, V1 Slice §4) that names the schema version bump, the backfill statement, and the cap-recheck path.
 - Sibling-repo touchpoints are listed: NQ witness-edge as a future composition (`external_witness_ref` reserved), Standing as the principal-roster source for tier transitions, `CROSS_COMPONENT_RELIANCE_GAP` for `tier_drift` in receipt verify.
 - A workspace-scope doctrine memory is committed citing this gap as a pinned premise; the dogfood pattern from earlier gaps holds.
+
+## Implementation Notes (V1, 2026-07-04)
+
+What shipped, and where it deviated from the spec above — recorded so the next
+reader doesn't mistake a deliberate choice for an oversight.
+
+**Landed as specified:** the `AuthoringTier` enum and cap table (`tier_cap`,
+`effective_reliance` in `api/models.py`); the `authoring_tier` column on
+`memory_objects` and `memory_events` plus reserved `external_witness_ref`
+(schema + `_add_missing_columns` migration, `SCHEMA_VERSION` 2→3); honest
+backfill as `provenance_unknown`; write-time cap enforcement (refuse
+over-cap commits) and rely-time re-application (`effective_reliance = min(stored,
+cap)`); the read surfaces (`explain`/`get`/`query` carry tier + effective
+reliance, on the MCP and CLI too); `contctl doctor --check authoring-tier`; and
+the custody path. 21 tests.
+
+**Deviations, each deliberate:**
+
+1. **Substrate defaults tier to `agent_authored`, it does not refuse unset**
+   (resolves Open Question 6). Making the field strictly required would break
+   every existing caller and the pinned agent_gov surface. The default is honest
+   for LLM-driven writes and *safe because it caps at advisory* — the laundering
+   the gap prevents is agent content reaching **actionable**, which the cap still
+   blocks. `custodian_signed`, `revoked`, and `provenance_unknown` remain
+   non-self-declarable (refused at observe/commit).
+
+2. **Custody promotion reuses `commit`/`revoke` events, not a new event type.**
+   `adjudicate --reaffirm` mints a `custodian_signed` successor via a normal
+   commit event whose receipt carries the `custody_record`; the original is
+   revoked-by-promotion. This avoids a schema enum change to `event_type` /
+   `receipt_type` (which would ripple through the CHECK constraints and
+   `migrate_schema`) while still satisfying invariants 8–9: custodian_signed is
+   reachable *only* here, a custody record is attached, history stays walkable.
+   The `custody_event_id` reference (invariant 8) is the commit event's own id.
+
+3. **CLI verb is `contctl adjudicate`, not `contctl memory adjudicate`.** The
+   existing CLI is flat (observe/commit/revoke/…); a nested `memory` group for
+   one verb would be inconsistent. Same behavior, flatter path.
+
+4. **`standing_contested` is deferred, not built.** V1 has no producer for it —
+   automatic standing-loss detection is an explicit deferral, and no manual
+   contest command is in the V1 slice. The doctor is forward-compatible (it would
+   surface contested entries) but none exist yet. The revoked-tier→cap-none path
+   *is* built and tested (via a direct tier set standing in for the future
+   standing-loss edge).
+
+5. **`rely_ok` stays a coarse boolean; the ceiling rides in `effective_reliance`.**
+   A `provenance_unknown` row stored at advisory reads `rely_ok=true` with
+   `effective_reliance=retrieve_only` — relyable *for retrieval*, not at advisory.
+   Only a cap of `none` (revoked tier) flips `rely_ok` to false, with the new
+   `AUTHORING_TIER_CAPPED` reason code. Consumers that need the ceiling read
+   `effective_reliance`, not the boolean.
+
+Still deferred per the spec's own list: the custody signature mechanism, NQ
+witness wiring (`external_witness_ref` reserved, unpopulated), cross-host tier
+sync/re-adjudication, receipt-side `tier_drift`, and the rich adjudication UI.
 
 ## Short Version
 

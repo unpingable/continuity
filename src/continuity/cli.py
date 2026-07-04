@@ -22,6 +22,9 @@ from typing import Any
 
 from continuity.api.models import (
     ActorRef,
+    AdjudicateMemoryRequest,
+    AdjudicationMotion,
+    AuthoringTier,
     Basis,
     CommitMemoryRequest,
     GetCaseRequest,
@@ -37,6 +40,7 @@ from continuity.api.models import (
     SourceRef,
     PremiseRef,
     VerifyRelianceRequest,
+    effective_reliance,
 )
 from continuity.declaration_export import (
     ExportSource,
@@ -44,6 +48,8 @@ from continuity.declaration_export import (
 )
 from continuity.doctor import (
     FindingStatus,
+    TierFindingStatus,
+    check_authoring_tier,
     check_premise_consistency,
 )
 from continuity.receipts.memory_receipts import format_receipt
@@ -401,6 +407,7 @@ def cmd_observe(args: argparse.Namespace) -> None:
         premises=premises,
         confidence=args.confidence,
         supersedes=args.supersedes,
+        authoring_tier=args.authoring_tier,
         actor=actor,
         idempotency_key=args.idempotency_key,
     )
@@ -415,6 +422,7 @@ def cmd_observe(args: argparse.Namespace) -> None:
         _out({
             "memory_id": resp.memory.memory_id,
             "status": resp.memory.status,
+            "authoring_tier": resp.memory.authoring_tier,
             "receipt_id": resp.receipt.receipt_id,
             "receipt_hash": resp.receipt.hash,
         })
@@ -437,6 +445,7 @@ def cmd_commit(args: argparse.Namespace) -> None:
         note=args.note,
         supersedes=args.supersedes,
         premises=premises,
+        authoring_tier=args.authoring_tier,
         idempotency_key=args.idempotency_key,
     )
 
@@ -451,6 +460,10 @@ def cmd_commit(args: argparse.Namespace) -> None:
             "memory_id": resp.memory.memory_id,
             "status": resp.memory.status,
             "reliance_class": resp.memory.reliance_class,
+            "authoring_tier": resp.memory.authoring_tier,
+            "effective_reliance": effective_reliance(
+                resp.memory.reliance_class, resp.memory.authoring_tier,
+            ),
             "receipt_id": resp.receipt.receipt_id,
             "receipt_hash": resp.receipt.hash,
         })
@@ -484,6 +497,60 @@ def cmd_revoke(args: argparse.Namespace) -> None:
             "status": resp.memory.status,
             "receipt_id": resp.receipt.receipt_id,
         })
+
+
+def cmd_adjudicate(args: argparse.Namespace) -> None:
+    """Custodian adjudication — the only legitimate path to custodian_signed.
+
+    --reaffirm --custody-record=<path> [--reliance-class ...] mints a
+    custodian_signed successor under the attached custody record (the original
+    is revoked-by-promotion). --retire revokes the memory as history.
+    """
+    store = _get_store(args)
+    actor = None
+    if args.actor:
+        actor = ActorRef(principal_id=args.actor, auth_method="cli")
+
+    if args.reaffirm and args.retire:
+        print("error: choose one of --reaffirm or --retire", file=sys.stderr)
+        sys.exit(2)
+    if not args.reaffirm and not args.retire:
+        print("error: one of --reaffirm or --retire is required", file=sys.stderr)
+        sys.exit(2)
+
+    if args.reaffirm:
+        if not args.custody_record:
+            print("error: --reaffirm requires --custody-record=<path>", file=sys.stderr)
+            sys.exit(2)
+        with open(args.custody_record, encoding="utf-8") as fh:
+            custody_record = json.load(fh)
+        req = AdjudicateMemoryRequest(
+            memory_id=args.memory_id,
+            motion=AdjudicationMotion.REAFFIRM,
+            custody_record=custody_record,
+            reliance_class=args.reliance_class,
+            reason=args.reason,
+            actor=actor,
+        )
+    else:
+        req = AdjudicateMemoryRequest(
+            memory_id=args.memory_id,
+            motion=AdjudicationMotion.RETIRE,
+            reason=args.reason,
+            actor=actor,
+        )
+
+    resp = store.adjudicate_memory(req)
+    _out({
+        "motion": req.motion,
+        "memory_id": resp.memory.memory_id,
+        "status": resp.memory.status,
+        "authoring_tier": resp.memory.authoring_tier,
+        "reliance_class": resp.memory.reliance_class,
+        "superseded_memory_id": resp.superseded_memory_id,
+        "receipt_id": resp.receipt.receipt_id,
+        "receipt_hash": resp.receipt.hash,
+    })
 
 
 def cmd_repair(args: argparse.Namespace) -> None:
@@ -979,11 +1046,15 @@ def _resolve_memory_dir(args: argparse.Namespace) -> Path:
 def cmd_doctor(args: argparse.Namespace) -> None:
     """Run an audit check.
 
-    V1 supports --check premise-consistency. Doctor output is testimony,
-    not authority; per docs/gaps/PREMISE_CONSISTENCY_DOCTOR.md
-    self-subject-collapse discipline, no findings are auto-resolved and
-    the doctor performs no writes.
+    V1 supports --check premise-consistency and --check authoring-tier. Doctor
+    output is testimony, not authority; per docs/gaps/PREMISE_CONSISTENCY_DOCTOR.md
+    self-subject-collapse discipline, no findings are auto-resolved and the
+    doctor performs no writes.
     """
+    if args.check == "authoring-tier":
+        _cmd_doctor_authoring_tier(args)
+        return
+
     if args.check != "premise-consistency":
         # argparse choices already constrains this; defensive.
         print(f"error: unknown check '{args.check}'", file=sys.stderr)
@@ -1039,6 +1110,28 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         for f in findings
     )
     sys.exit(2 if has_issues else 0)
+
+
+def _cmd_doctor_authoring_tier(args: argparse.Namespace) -> None:
+    """Scan the store for authoring-tier violations (MEMORY_AUTHORING_TIER §8)."""
+    store = _get_store(args)
+    findings = check_authoring_tier(store)
+    flags = [f for f in findings if f.status == TierFindingStatus.FLAG]
+
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "check": "authoring-tier",
+            "findings": [f.to_dict() for f in findings],
+        }, indent=2, default=str))
+    else:
+        print("authoring-tier check")
+        print(f"  {len(flags)} FLAG")
+        for f in flags:
+            print()
+            print(f"FLAG  memory:  {f.memory_id}  ({f.scope}/{f.kind})")
+            print(f"      reason:  {f.reason}")
+
+    sys.exit(2 if flags else 0)
 
 
 # ---------------------------------------------------------------------------
@@ -1175,6 +1268,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="memory_id this observation will replace when committed",
     )
     p_obs.add_argument("--actor", help="principal_id for the actor")
+    p_obs.add_argument(
+        "--authoring-tier", default=None,
+        choices=["agent_authored", "runtime_authored"],
+        help=(
+            "who authored this (caps how much it may be relied on). Defaults to "
+            "agent_authored. custodian_signed is reachable only via 'adjudicate'."
+        ),
+    )
     p_obs.add_argument("--idempotency-key", default=None)
     p_obs.add_argument("--receipt", action="store_true", help="output full receipt")
     p_obs.add_argument("-q", "--quiet", action="store_true", help="output only memory_id")
@@ -1191,9 +1292,40 @@ def build_parser() -> argparse.ArgumentParser:
     p_cmt.add_argument("--supersedes", default=None)
     p_cmt.add_argument("--premise", action="append", help="memory_id[:relation[:strength]]")
     p_cmt.add_argument("--actor", help="principal_id for approver")
+    p_cmt.add_argument(
+        "--authoring-tier", default=None,
+        choices=["agent_authored", "runtime_authored"],
+        help="restate the authoring tier at commit (defaults to the observe-time tier)",
+    )
     p_cmt.add_argument("--idempotency-key", default=None)
     p_cmt.add_argument("--receipt", action="store_true", help="output full receipt")
     p_cmt.add_argument("-q", "--quiet", action="store_true", help="output only memory_id")
+
+    # adjudicate — the custody path to custodian_signed (or retire to history)
+    p_adj = sub.add_parser(
+        "adjudicate",
+        help="custodian adjudication: --reaffirm (mint custodian_signed) or --retire",
+    )
+    p_adj.add_argument("memory_id")
+    p_adj.add_argument(
+        "--reaffirm", action="store_true",
+        help="mint a custodian_signed successor under a custody record",
+    )
+    p_adj.add_argument(
+        "--retire", action="store_true",
+        help="revoke the memory as history",
+    )
+    p_adj.add_argument(
+        "--custody-record", default=None, metavar="PATH",
+        help="path to a JSON custody attestation (required for --reaffirm)",
+    )
+    p_adj.add_argument(
+        "--reliance-class", default="advisory",
+        choices=[r.value for r in RelianceClass],
+        help="reliance class for the reaffirmed successor (custodian_signed caps at actionable)",
+    )
+    p_adj.add_argument("--reason", default=None)
+    p_adj.add_argument("--actor", help="principal_id for the custodian")
 
     # revoke
     p_rev = sub.add_parser("revoke", help="revoke a memory")
@@ -1404,7 +1536,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_doc.add_argument(
         "--check", required=True,
-        choices=["premise-consistency"],
+        choices=["premise-consistency", "authoring-tier"],
         help="which check to run",
     )
     p_doc.add_argument(
@@ -1443,6 +1575,7 @@ COMMANDS = {
     "observe": cmd_observe,
     "commit": cmd_commit,
     "revoke": cmd_revoke,
+    "adjudicate": cmd_adjudicate,
     "repair": cmd_repair,
     "get": cmd_get,
     "import": cmd_import,

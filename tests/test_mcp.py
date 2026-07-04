@@ -79,6 +79,41 @@ def test_observe_and_commit(server: ContinuityMCPServer) -> None:
     assert cmt["reliance_class"] == "advisory"
 
 
+def test_mcp_surfaces_authoring_tier_and_effective_reliance(
+    server: ContinuityMCPServer,
+) -> None:
+    """observe/commit accept + return the tier; commit/get/query surface the
+    effective reliance ceiling (MEMORY_AUTHORING_TIER read discipline)."""
+    obs = server.call_tool("memory_observe", {
+        "scope": "tier", "kind": "fact", "basis": "direct_capture",
+        "content": {"x": 1},
+    })
+    assert obs["authoring_tier"] == "agent_authored"
+
+    cmt = server.call_tool("memory_commit", {
+        "memory_id": obs["memory_id"], "reliance_class": "advisory",
+    })
+    assert cmt["authoring_tier"] == "agent_authored"
+    assert cmt["effective_reliance"] == "advisory"
+
+    got = server.call_tool("memory_get", {"memory_id": obs["memory_id"]})
+    assert got["authoring_tier"] == "agent_authored"
+    assert got["effective_reliance"] == "advisory"
+
+
+def test_mcp_commit_refuses_over_cap(server: ContinuityMCPServer) -> None:
+    """An agent_authored memory cannot be committed at actionable via MCP."""
+    obs = server.call_tool("memory_observe", {
+        "scope": "tier", "kind": "fact", "basis": "direct_capture",
+        "content": {"x": 1},
+    })
+    cmt = server.call_tool("memory_commit", {
+        "memory_id": obs["memory_id"], "reliance_class": "actionable",
+    })
+    assert cmt.get("refused") is True
+    assert "exceeds the cap" in cmt["error"]
+
+
 def test_revoke(server: ContinuityMCPServer) -> None:
     obs = server.call_tool("memory_observe", {
         "scope": "test",

@@ -17,10 +17,14 @@ from typing import Any, Iterator
 # CHECK constraint expansions). It is the store/schema substrate version,
 # not the package version. Stored in store_metadata so receipts and
 # cross-system consumers can pin which schema shape produced an answer.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 from continuity.api.models import (
     ActorRef,
+    AdjudicateMemoryRequest,
+    AdjudicateMemoryResponse,
+    AdjudicationMotion,
+    AuthoringTier,
     Basis,
     CaseBundle,
     CaseItem,
@@ -58,6 +62,8 @@ from continuity.api.models import (
     RevokeMemoryResponse,
     SourceRef,
     StandingRef,
+    effective_reliance,
+    tier_cap,
 )
 from continuity.util.clock import isoformat_now, to_isoformat, utcnow
 from datetime import datetime
@@ -277,6 +283,33 @@ class SQLiteStore:
                 "ALTER TABLE memory_links ADD COLUMN pinned_content_hash TEXT NULL"
             )
 
+        # Authoring tier (MEMORY_AUTHORING_TIER_GAP). Pre-doctrine rows are
+        # backfilled 'provenance_unknown' — the honest label. This is not a
+        # false claim of agent authorship; it ratchets the reliance cap
+        # (provenance_unknown caps at retrieve_only) without minting authority.
+        obj_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(memory_objects)").fetchall()
+        }
+        if "authoring_tier" not in obj_cols:
+            conn.execute(
+                "ALTER TABLE memory_objects ADD COLUMN authoring_tier "
+                "TEXT NOT NULL DEFAULT 'provenance_unknown'"
+            )
+
+        evt_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(memory_events)").fetchall()
+        }
+        if "authoring_tier" not in evt_cols:
+            conn.execute(
+                "ALTER TABLE memory_events ADD COLUMN authoring_tier TEXT NULL"
+            )
+        if "external_witness_ref" not in evt_cols:
+            conn.execute(
+                "ALTER TABLE memory_events ADD COLUMN external_witness_ref TEXT NULL"
+            )
+
     def _ensure_store_metadata(
         self,
         conn: sqlite3.Connection,
@@ -448,6 +481,20 @@ class SQLiteStore:
     def get_memory(self, memory_id: str) -> MemoryObject:
         with self._connect() as conn:
             return self._get_memory(conn, memory_id)
+
+    def list_all_memories(self) -> list[MemoryObject]:
+        """Every memory in the store, all scopes/statuses. For audit scans
+        (e.g. the authoring-tier doctor); not a query surface for consumers."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM memory_objects ORDER BY created_at ASC, memory_id ASC"
+            ).fetchall()
+            return [self._row_to_memory_object(r) for r in rows]
+
+    def active_dependents(self, memory_id: str) -> list[MemoryLink]:
+        """Active links that cite `memory_id` as a source (its dependents)."""
+        with self._connect() as conn:
+            return self._load_dependents(conn, memory_id, include_revoked=False)
 
     def latest_memory(
         self,
@@ -884,12 +931,18 @@ class SQLiteStore:
                     standing=req.standing,
                 )
 
+            # Resolve the tier once at the boundary: None -> agent_authored (the
+            # honest default for LLM-driven writes; the allow_observe gate has
+            # already refused any non-self-declarable tier).
+            resolved_tier = req.authoring_tier or AuthoringTier.AGENT_AUTHORED
+
             memory = MemoryObject(
                 scope=req.scope,
                 kind=req.kind,
                 basis=req.basis,
                 status=MemoryStatus.OBSERVED,
                 reliance_class=RelianceClass.NONE,
+                authoring_tier=resolved_tier,
                 confidence=req.confidence,
                 content=req.content,
                 source_refs=req.source_refs,
@@ -909,11 +962,13 @@ class SQLiteStore:
                 actor=req.actor,
                 standing=req.standing,
                 receipt_id=receipt.receipt_id,
+                authoring_tier=memory.authoring_tier,
                 payload={
                     "status": memory.status,
                     "content": memory.content,
                     "source_refs": [s.model_dump(mode="json") for s in memory.source_refs],
                     "confidence": memory.confidence,
+                    "authoring_tier": str(memory.authoring_tier),
                 },
                 idempotency_key=req.idempotency_key,
             )
@@ -964,9 +1019,28 @@ class SQLiteStore:
                     f"cannot commit revoked memory {memory.memory_id}"
                 )
 
+            # Resolve the final authoring tier: a commit may restate it (already
+            # gated for self-declarability in allow_commit); otherwise keep the
+            # observe-time tier. Then enforce the reliance cap against it — the
+            # write-time half of "tier upper-bounds reliance_class."
+            final_tier = req.authoring_tier or memory.authoring_tier
+            cap_decision = self.policy.allow_reliance_for_tier(
+                final_tier, req.reliance_class,
+            )
+            if not cap_decision.allowed:
+                self._emit_refusal_and_raise(
+                    conn,
+                    intended_event=EventType.COMMIT,
+                    decision=cap_decision,
+                    request_payload=req.model_dump(mode="json"),
+                    actor=req.approved_by,
+                    standing=req.standing,
+                )
+
             prior_status = memory.status
             memory.status = MemoryStatus.COMMITTED
             memory.reliance_class = req.reliance_class
+            memory.authoring_tier = final_tier
             memory.approved_by = req.approved_by
             if req.supersedes is not None:
                 memory.supersedes = req.supersedes
@@ -978,6 +1052,7 @@ class SQLiteStore:
                 "prior_status": prior_status,
                 "new_status": memory.status,
                 "reliance_class": memory.reliance_class,
+                "authoring_tier": str(memory.authoring_tier),
                 "approved_by": (
                     memory.approved_by.model_dump(mode="json")
                     if memory.approved_by else None
@@ -1004,10 +1079,12 @@ class SQLiteStore:
                 actor=req.approved_by,
                 standing=req.standing,
                 receipt_id=receipt.receipt_id,
+                authoring_tier=memory.authoring_tier,
                 payload={
                     "prior_status": prior_status,
                     "new_status": memory.status,
                     "reliance_class": memory.reliance_class,
+                    "authoring_tier": str(memory.authoring_tier),
                     "supersedes": memory.supersedes,
                     "expires_at": to_isoformat(memory.expires_at),
                     "note": req.note,
@@ -1195,6 +1272,142 @@ class SQLiteStore:
 
             return RevokeMemoryResponse(
                 memory=memory, event=event, receipt=receipt,
+            )
+
+    def adjudicate_memory(
+        self, req: AdjudicateMemoryRequest,
+    ) -> AdjudicateMemoryResponse:
+        """Custodian adjudication — the only legitimate path to custodian_signed.
+
+        `reaffirm` mints a NEW memory object at custodian_signed tier, superseding
+        the original, under an attached custody record (MEMORY_AUTHORING_TIER §8,
+        §9). Because the successor is minted here — not via observe/commit — it
+        bypasses the self-declarable-tier gate legitimately: this IS the custody
+        path. The original is revoked-by-promotion (preserved, not destroyed).
+
+        `retire` revokes the memory as history.
+        """
+        if req.motion == AdjudicationMotion.RETIRE:
+            revoked = self.revoke_memory(RevokeMemoryRequest(
+                memory_id=req.memory_id,
+                reason=req.reason or "retired by custodian adjudication",
+                revoked_by=req.actor,
+                standing=req.standing,
+                idempotency_key=req.idempotency_key,
+            ))
+            return AdjudicateMemoryResponse(
+                memory=revoked.memory, event=revoked.event, receipt=revoked.receipt,
+            )
+
+        # --- reaffirm: mint a custodian_signed successor -------------------- #
+        with self._tx() as conn:
+            original = self._get_memory(conn, req.memory_id)
+
+            # The successor is custodian_signed, so its reliance may reach up to
+            # the custodian cap (actionable). Enforce the cap explicitly.
+            cap_decision = self.policy.allow_reliance_for_tier(
+                AuthoringTier.CUSTODIAN_SIGNED, req.reliance_class,
+            )
+            if not cap_decision.allowed:
+                self._emit_refusal_and_raise(
+                    conn,
+                    intended_event=EventType.COMMIT,
+                    decision=cap_decision,
+                    request_payload=req.model_dump(mode="json"),
+                    actor=req.actor,
+                    standing=req.standing,
+                )
+
+            successor = MemoryObject(
+                scope=original.scope,
+                kind=original.kind,
+                basis=original.basis,
+                status=MemoryStatus.COMMITTED,
+                reliance_class=req.reliance_class,
+                authoring_tier=AuthoringTier.CUSTODIAN_SIGNED,
+                confidence=original.confidence,
+                content=original.content,
+                source_refs=original.source_refs,
+                expires_at=original.expires_at,
+                supersedes=original.memory_id,
+                created_by=original.created_by,
+                approved_by=req.actor,
+            )
+
+            receipt_content = {
+                "memory_id": successor.memory_id,
+                "supersedes": original.memory_id,
+                "authoring_tier": str(successor.authoring_tier),
+                "reliance_class": str(successor.reliance_class),
+                "custody_record": req.custody_record,
+                "adjudicated_by": (
+                    req.actor.model_dump(mode="json") if req.actor else None
+                ),
+                "standing": (
+                    req.standing.model_dump(mode="json") if req.standing else None
+                ),
+                "reason": req.reason,
+            }
+            receipt = self._build_receipt(
+                conn, ReceiptType.MEMORY_COMMIT, receipt_content,
+            )
+
+            event = MemoryEvent(
+                memory_id=successor.memory_id,
+                event_type=EventType.COMMIT,
+                actor=req.actor,
+                standing=req.standing,
+                receipt_id=receipt.receipt_id,
+                authoring_tier=successor.authoring_tier,
+                payload={
+                    "custody_promotion": True,
+                    "supersedes": original.memory_id,
+                    "authoring_tier": str(successor.authoring_tier),
+                    "reliance_class": str(successor.reliance_class),
+                    # The custody_event_id is this event's own id — the opaque
+                    # reference invariant 8 stores; crypto shape is deferred.
+                    "custody_record": req.custody_record,
+                },
+                idempotency_key=req.idempotency_key,
+            )
+
+            self._insert_memory_object(conn, successor)
+            self._insert_receipt(conn, receipt)
+            self._insert_memory_event(conn, event)
+
+            # Original is revoked-by-promotion: preserved as history, pointing at
+            # its custodian_signed successor. History stays walkable (§9).
+            original.status = MemoryStatus.REVOKED
+            original.revoked_by = successor.memory_id
+            revoke_receipt = self._build_receipt(
+                conn, ReceiptType.MEMORY_REVOKE, {
+                    "memory_id": original.memory_id,
+                    "prior_status": str(MemoryStatus.COMMITTED),
+                    "reason": "superseded by custody promotion",
+                    "replacement_memory_id": successor.memory_id,
+                },
+            )
+            revoke_event = MemoryEvent(
+                memory_id=original.memory_id,
+                event_type=EventType.REVOKE,
+                actor=req.actor,
+                standing=req.standing,
+                receipt_id=revoke_receipt.receipt_id,
+                payload={
+                    "prior_status": str(MemoryStatus.COMMITTED),
+                    "reason": "superseded by custody promotion",
+                    "replacement_memory_id": successor.memory_id,
+                },
+            )
+            self._update_memory_object(conn, original)
+            self._insert_receipt(conn, revoke_receipt)
+            self._insert_memory_event(conn, revoke_event)
+
+            return AdjudicateMemoryResponse(
+                memory=successor,
+                event=event,
+                receipt=receipt,
+                superseded_memory_id=original.memory_id,
             )
 
     def import_memory(self, req: ImportMemoryRequest) -> ImportMemoryResponse:
@@ -1476,12 +1689,26 @@ class SQLiteStore:
         # rendered message. The message strings are held identical to their
         # pre-structuring form on purpose — flat rely_reason consumers must see
         # the same text (per USEFUL_REFUSAL_EXPLAIN invariant 5).
+        #
+        # The authoring tier and its effective reliance ride in details on every
+        # outcome — read at tier, never above it (MEMORY_AUTHORING_TIER
+        # invariant 5). `_tier` folds them in without repeating the keys.
+        cap = tier_cap(memory.authoring_tier)
+        eff = effective_reliance(memory.reliance_class, memory.authoring_tier)
+
+        def _tier(extra: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "authoring_tier": str(memory.authoring_tier),
+                "effective_reliance": str(eff),
+                **extra,
+            }
+
         if memory.status != MemoryStatus.COMMITTED:
             return RelyState(
                 rely_ok=False,
                 code=RelyReasonCode.STATUS_NOT_COMMITTED,
                 message=f"memory status is {memory.status}, not committed",
-                details={"status": str(memory.status)},
+                details=_tier({"status": str(memory.status)}),
             )
 
         if memory.expires_at is not None:
@@ -1492,15 +1719,29 @@ class SQLiteStore:
                     rely_ok=False,
                     code=RelyReasonCode.EXPIRED,
                     message="memory is expired",
-                    details={"expires_at": exp_iso, "evaluation_time": eval_iso},
+                    details=_tier({"expires_at": exp_iso, "evaluation_time": eval_iso}),
                 )
 
-        if memory.reliance_class == RelianceClass.NONE:
+        # Reliance floor: the *effective* class (min of stored and tier cap) is
+        # what governs. If it bottoms out at none, distinguish a genuinely
+        # none-stored row from one the authoring tier capped down to none (e.g.
+        # a revoked-tier entry that was committed at a higher class).
+        if eff == RelianceClass.NONE:
+            if memory.reliance_class == RelianceClass.NONE:
+                return RelyState(
+                    rely_ok=False,
+                    code=RelyReasonCode.RELIANCE_NONE,
+                    message="reliance_class=none",
+                    details=_tier({"reliance_class": str(memory.reliance_class)}),
+                )
             return RelyState(
                 rely_ok=False,
-                code=RelyReasonCode.RELIANCE_NONE,
-                message="reliance_class=none",
-                details={"reliance_class": str(memory.reliance_class)},
+                code=RelyReasonCode.AUTHORING_TIER_CAPPED,
+                message=(
+                    f"authoring_tier={memory.authoring_tier} caps reliance to "
+                    f"{cap}; stored {memory.reliance_class} may not be relied on"
+                ),
+                details=_tier({"reliance_class": str(memory.reliance_class), "cap": str(cap)}),
             )
 
         if (
@@ -1511,10 +1752,10 @@ class SQLiteStore:
                 rely_ok=False,
                 code=RelyReasonCode.KIND_BASIS_POLICY,
                 message=f"{memory.kind} cannot be actionable by default",
-                details={
+                details=_tier({
                     "kind": str(memory.kind),
                     "requested_class": str(memory.reliance_class),
-                },
+                }),
             )
 
         if (
@@ -1525,10 +1766,10 @@ class SQLiteStore:
                 rely_ok=False,
                 code=RelyReasonCode.KIND_BASIS_POLICY,
                 message=f"basis={memory.basis} cannot be actionable by default",
-                details={
+                details=_tier({
                     "basis": str(memory.basis),
                     "requested_class": str(memory.reliance_class),
-                },
+                }),
             )
 
         # Check hard premises
@@ -1559,14 +1800,14 @@ class SQLiteStore:
                 rely_ok=False,
                 code=RelyReasonCode.HARD_PREMISE_UNAVAILABLE,
                 message=f"hard premises unavailable: {', '.join(bad)}",
-                details={"bad_premises": bad},
+                details=_tier({"bad_premises": bad}),
             )
 
         return RelyState(
             rely_ok=True,
             code=RelyReasonCode.ELIGIBLE,
             message=f"eligible for reliance at class {memory.reliance_class}",
-            details={"reliance_class": str(memory.reliance_class)},
+            details=_tier({"reliance_class": str(memory.reliance_class)}),
         )
 
     # ------------------------------------------------------------------
@@ -1668,8 +1909,8 @@ class SQLiteStore:
                 confidence, content_json, source_refs_json,
                 created_at, updated_at, expires_at,
                 supersedes, revoked_by,
-                created_by_json, approved_by_json
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                created_by_json, approved_by_json, authoring_tier
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 m.memory_id, m.scope, str(m.kind), str(m.basis),
@@ -1681,6 +1922,7 @@ class SQLiteStore:
                 m.supersedes, m.revoked_by,
                 _to_json(m.created_by.model_dump(mode="json")) if m.created_by else None,
                 _to_json(m.approved_by.model_dump(mode="json")) if m.approved_by else None,
+                str(m.authoring_tier),
             ),
         )
 
@@ -1691,7 +1933,7 @@ class SQLiteStore:
                 scope=?, kind=?, basis=?, status=?, reliance_class=?,
                 confidence=?, content_json=?, source_refs_json=?,
                 expires_at=?, supersedes=?, revoked_by=?,
-                created_by_json=?, approved_by_json=?,
+                created_by_json=?, approved_by_json=?, authoring_tier=?,
                 updated_at=?
             WHERE memory_id=?
             """,
@@ -1703,6 +1945,7 @@ class SQLiteStore:
                 to_isoformat(m.expires_at), m.supersedes, m.revoked_by,
                 _to_json(m.created_by.model_dump(mode="json")) if m.created_by else None,
                 _to_json(m.approved_by.model_dump(mode="json")) if m.approved_by else None,
+                str(m.authoring_tier),
                 isoformat_now(),
                 m.memory_id,
             ),
@@ -1730,8 +1973,9 @@ class SQLiteStore:
                     event_id, memory_id, event_type,
                     actor_json, standing_json,
                     receipt_id, payload_json,
-                    created_at, idempotency_key
-                ) VALUES (?,?,?,?,?,?,?,?,?)
+                    created_at, idempotency_key,
+                    authoring_tier, external_witness_ref
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     e.event_id, e.memory_id, str(e.event_type),
@@ -1739,6 +1983,8 @@ class SQLiteStore:
                     _to_json(e.standing.model_dump(mode="json")) if e.standing else None,
                     e.receipt_id, _to_json(e.payload),
                     to_isoformat(e.created_at), e.idempotency_key,
+                    str(e.authoring_tier) if e.authoring_tier is not None else None,
+                    e.external_witness_ref,
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -1849,6 +2095,7 @@ class SQLiteStore:
             "actor": memory.created_by.model_dump(mode="json") if memory.created_by else None,
             "standing": req.standing.model_dump(mode="json") if req.standing else None,
             "premises": [p.model_dump(mode="json") for p in req.premises],
+            "authoring_tier": str(memory.authoring_tier),
         }
 
     def _load_idempotent_response(
@@ -1886,6 +2133,15 @@ class SQLiteStore:
     def _row_to_memory_object(self, row: sqlite3.Row) -> MemoryObject:
         created_by_raw = from_json(row["created_by_json"])
         approved_by_raw = from_json(row["approved_by_json"])
+        # authoring_tier may be absent on rows in a DB not yet migrated (AG
+        # opens stores without initialize()). An un-migrated row has genuinely
+        # unknown provenance — read it as provenance_unknown (caps at
+        # retrieve_only), never as a false claim of agent authorship.
+        tier = (
+            row["authoring_tier"]
+            if "authoring_tier" in row.keys() and row["authoring_tier"] is not None
+            else AuthoringTier.PROVENANCE_UNKNOWN
+        )
         return MemoryObject(
             memory_id=row["memory_id"],
             scope=row["scope"],
@@ -1893,6 +2149,7 @@ class SQLiteStore:
             basis=row["basis"],
             status=row["status"],
             reliance_class=row["reliance_class"],
+            authoring_tier=tier,
             confidence=row["confidence"],
             content=from_json(row["content_json"]),
             source_refs=[
@@ -1911,6 +2168,9 @@ class SQLiteStore:
     def _row_to_memory_event(self, row: sqlite3.Row) -> MemoryEvent:
         actor_raw = from_json(row["actor_json"])
         standing_raw = from_json(row["standing_json"])
+        keys = row.keys()
+        tier = row["authoring_tier"] if "authoring_tier" in keys else None
+        witness = row["external_witness_ref"] if "external_witness_ref" in keys else None
         return MemoryEvent(
             event_id=row["event_id"],
             memory_id=row["memory_id"],
@@ -1919,6 +2179,8 @@ class SQLiteStore:
             standing=StandingRef.model_validate(standing_raw) if standing_raw else None,
             receipt_id=row["receipt_id"],
             payload=from_json(row["payload_json"]),
+            authoring_tier=tier,
+            external_witness_ref=witness,
             created_at=row["created_at"],
             idempotency_key=row["idempotency_key"],
         )

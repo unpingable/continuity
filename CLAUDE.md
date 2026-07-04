@@ -18,6 +18,7 @@ continuity: Governed state persistence with observe/commit/rely semantics. Durab
 3. Historical structure is never destroyed: revoked links stay as evidence, `explain` reads taint from source status
 4. Retrieval is not authority: `reliance_class` governs what may be relied on, not just what can be queried
 5. Premises append, never silently replace
+6. Provenance bounds authority: `authoring_tier` upper-bounds `reliance_class` (enforced at write, re-applied at rely as `effective_reliance`); `custodian_signed` is reachable only via `contctl adjudicate`, never a routine write
 
 ## Quick Start
 

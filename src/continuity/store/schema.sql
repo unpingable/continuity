@@ -70,7 +70,22 @@ CREATE TABLE IF NOT EXISTS memory_objects (
     revoked_by    TEXT NULL REFERENCES memory_objects(memory_id),
 
     created_by_json   TEXT NULL CHECK (created_by_json IS NULL OR json_valid(created_by_json)),
-    approved_by_json  TEXT NULL CHECK (approved_by_json IS NULL OR json_valid(approved_by_json))
+    approved_by_json  TEXT NULL CHECK (approved_by_json IS NULL OR json_valid(approved_by_json)),
+
+    -- Who authored this, upper-bounding how much it may be relied on.
+    -- See docs/gaps/MEMORY_AUTHORING_TIER_GAP.md. Placed LAST so the column
+    -- order matches _add_missing_columns' ALTER ADD COLUMN (which appends),
+    -- which migrate_schema's writable_schema patch depends on. Existing DBs get
+    -- this column via that ALTER, backfilled 'provenance_unknown' (honest).
+    authoring_tier  TEXT NOT NULL DEFAULT 'agent_authored' CHECK (
+        authoring_tier IN (
+            'agent_authored',
+            'runtime_authored',
+            'custodian_signed',
+            'revoked',
+            'provenance_unknown'
+        )
+    )
 );
 
 -- Layer 3: hash-chained receipts (created before events that reference them)
@@ -113,7 +128,15 @@ CREATE TABLE IF NOT EXISTS memory_events (
     payload_json    TEXT NOT NULL CHECK (json_valid(payload_json)),
 
     created_at      TEXT NOT NULL,
-    idempotency_key TEXT NULL
+    idempotency_key TEXT NULL,
+
+    -- Authoring tier at the time of this event (audit trail). NULL on
+    -- pre-doctrine events. Reserved external_witness_ref for the future NQ
+    -- witness edge (MEMORY_AUTHORING_TIER_GAP invariant 11) — never populated
+    -- in V1; naming it now avoids a retrofit. Placed LAST to match the ALTER
+    -- ADD COLUMN order in _add_missing_columns.
+    authoring_tier       TEXT NULL,
+    external_witness_ref TEXT NULL
 );
 
 -- Singleton metadata about this store: identity and provenance.
@@ -221,6 +244,9 @@ CREATE INDEX IF NOT EXISTS idx_memory_objects_scope_kind_status
 
 CREATE INDEX IF NOT EXISTS idx_memory_objects_reliance_class
     ON memory_objects(reliance_class);
+
+CREATE INDEX IF NOT EXISTS idx_memory_objects_scope_authoring_tier
+    ON memory_objects(scope, authoring_tier);
 
 CREATE INDEX IF NOT EXISTS idx_memory_objects_expires_at
     ON memory_objects(expires_at);
