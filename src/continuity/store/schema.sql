@@ -85,7 +85,13 @@ CREATE TABLE IF NOT EXISTS memory_objects (
             'revoked',
             'provenance_unknown'
         )
-    )
+    ),
+
+    -- When the underlying fact was observed, distinct from created_at (record
+    -- time). Optional; no backfill. CONTINUITY_TIME_DISCIPLINE V2 invariant 8.
+    -- Placed last (after authoring_tier) so the column order matches the ALTER
+    -- ADD COLUMN order in _add_missing_columns, which migrate_schema depends on.
+    source_observed_at  TEXT NULL
 );
 
 -- Layer 3: hash-chained receipts (created before events that reference them)

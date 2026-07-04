@@ -408,6 +408,9 @@ def cmd_observe(args: argparse.Namespace) -> None:
         confidence=args.confidence,
         supersedes=args.supersedes,
         authoring_tier=args.authoring_tier,
+        source_observed_at=_parse_cli_evaluation_time(
+            getattr(args, "source_observed_at", None)
+        ),
         actor=actor,
         idempotency_key=args.idempotency_key,
     )
@@ -1266,6 +1269,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_obs.add_argument(
         "--supersedes", default=None,
         help="memory_id this observation will replace when committed",
+    )
+    p_obs.add_argument(
+        "--source-observed-at", dest="source_observed_at", default=None,
+        help=(
+            "ISO-8601 time the underlying fact was OBSERVED (distinct from now, "
+            "when it is recorded). Optional; carries the observe-vs-record lag."
+        ),
     )
     p_obs.add_argument("--actor", help="principal_id for the actor")
     p_obs.add_argument(

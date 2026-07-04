@@ -707,6 +707,7 @@ class ContinuityMCPServer:
             premises=premises,
             supersedes=args.get("supersedes"),
             authoring_tier=args.get("authoring_tier"),
+            source_observed_at=_parse_evaluation_time(args.get("source_observed_at")),
             actor=_mcp_actor(),
         )
 

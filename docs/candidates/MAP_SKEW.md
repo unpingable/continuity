@@ -1,8 +1,8 @@
 # Candidate: MapSkew — directional belief-state error detection
 
-**Status:** candidate (not gap-spec, not implementation)
+**Status:** candidate (not gap-spec, not implementation) — one of three graduation triggers now cleared; see Graduation Assessment 2026-07-04
 **Originated:** 2026-05-20
-**Depends on:** `gaps/CONTINUITY_TIME_DISCIPLINE.md` V2 named fields (`source_observed_at`, `last_confirmed_at`, eventual staleness gradient) as schema substrate; a not-yet-owned observation-side surface that produces structured artifact-state claims commensurable with memory claims
+**Depends on:** ~~`source_observed_at`~~ (landed 2026-07-04, `CONTINUITY_TIME_DISCIPLINE` V2) plus the still-deferred `last_confirmed_at` / staleness gradient as schema substrate; **and** a not-yet-owned observation-side surface that produces structured artifact-state claims commensurable with memory claims — the standing blocker
 **Related:** `gaps/PREMISE_CONSISTENCY_DOCTOR.md` (orthogonal failure shape — child-vs-premise consistency); the operator-side recognition rule [`feedback_memory_is_evidence_not_completion`](../../../.claude/projects/-home-jbeck-git-continuity/memory/feedback_memory_is_evidence_not_completion.md) (the failure mode this would detect mechanically)
 
 ## The Idea
@@ -78,6 +78,40 @@ This candidate becomes a gap-spec when:
 - A second concrete dogfood instance demonstrates the failure mode in a different domain than projection-laundering — proving the axes generalize beyond the case that originated them.
 
 Per `gaps/CONTINUITY_TIME_DISCIPLINE.md`'s revision discipline: graduate this candidate when implementation pressure proves the framing underspecified, not when downstream events merely happen. Until then, the framing stays as written and the keeper stays available for recognition.
+
+## Graduation Assessment (2026-07-04)
+
+Assessed against the three triggers after the operator asked to "get to the
+candidate." Honest finding: **one of three cleared; MapSkew does not graduate.**
+
+1. **Observation-side owner — STILL UNIDENTIFIED (the standing blocker).** Nothing
+   in the constellation produces artifact-state claims commensurable with memory
+   claims into continuity. The 2026-07-03 survey confirmed NQ, Standing, and
+   Linear Accountant carry no such surface, and continuity holds only `source_refs`
+   pointer metadata, not observed state. Building a repo-scanner or chartering a new
+   observation organ to unblock this would be *inventing the inputs* — the exact
+   "comparator without inputs / calculus theology in spectroscopy clothing" the
+   candidate warns against. Not done.
+
+2. **Time-discipline V2 substrate — PARTIALLY CLEARED.** `source_observed_at`
+   landed 2026-07-04 (it is pure capture, invents no taxonomy). But the trigger
+   also names "a comparable claim shape on memory" — the observed-artifact-state
+   claim the comparator diffs against — which is trigger 1's surface and does not
+   exist. So the substrate half is real; the comparator-input half is not.
+
+3. **Second dogfood in a different domain — STILL ABSENT.** Only the 2026-05-13
+   projection-laundering instance exists. The axes taxonomy (recency / completeness
+   / authority / capability / integration) remains sketched, not earned.
+
+**Why it stops here, on purpose.** Forcing MapSkew to a gap-spec or implementation
+now would ship it as more mature than reality — which is *blueshift*, the exact
+failure mode MapSkew exists to detect. Advancing it under operator enthusiasm rather
+than earned inputs would make this document the first real dogfood instance of its
+own thesis, in the wrong direction. The disciplined outcome is: bank the substrate
+win (`source_observed_at`), leave the keeper doing recognition work, and hold
+graduation until a genuine observation-side owner and a second forcing case arrive.
+The candidate stage is exactly for this: the slot is marked, the vocabulary preserved,
+the substrate now partly built — and the taxonomy stays un-invented until pressure earns it.
 
 ## Not in scope, even at candidate stage
 

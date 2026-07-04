@@ -17,7 +17,7 @@ from typing import Any, Iterator
 # CHECK constraint expansions). It is the store/schema substrate version,
 # not the package version. Stored in store_metadata so receipts and
 # cross-system consumers can pin which schema shape produced an answer.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 from continuity.api.models import (
     ActorRef,
@@ -295,6 +295,12 @@ class SQLiteStore:
             conn.execute(
                 "ALTER TABLE memory_objects ADD COLUMN authoring_tier "
                 "TEXT NOT NULL DEFAULT 'provenance_unknown'"
+            )
+        # source_observed_at (CONTINUITY_TIME_DISCIPLINE V2). Nullable, no
+        # backfill — pre-doctrine rows simply never carried the signal.
+        if "source_observed_at" not in obj_cols:
+            conn.execute(
+                "ALTER TABLE memory_objects ADD COLUMN source_observed_at TEXT NULL"
             )
 
         evt_cols = {
@@ -947,6 +953,7 @@ class SQLiteStore:
                 content=req.content,
                 source_refs=req.source_refs,
                 expires_at=req.expires_at,
+                source_observed_at=req.source_observed_at,
                 supersedes=req.supersedes,
                 created_by=req.actor,
             )
@@ -1329,6 +1336,7 @@ class SQLiteStore:
                 content=original.content,
                 source_refs=original.source_refs,
                 expires_at=original.expires_at,
+                source_observed_at=original.source_observed_at,
                 supersedes=original.memory_id,
                 created_by=original.created_by,
                 approved_by=req.actor,
@@ -1909,8 +1917,9 @@ class SQLiteStore:
                 confidence, content_json, source_refs_json,
                 created_at, updated_at, expires_at,
                 supersedes, revoked_by,
-                created_by_json, approved_by_json, authoring_tier
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                created_by_json, approved_by_json, authoring_tier,
+                source_observed_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 m.memory_id, m.scope, str(m.kind), str(m.basis),
@@ -1923,6 +1932,7 @@ class SQLiteStore:
                 _to_json(m.created_by.model_dump(mode="json")) if m.created_by else None,
                 _to_json(m.approved_by.model_dump(mode="json")) if m.approved_by else None,
                 str(m.authoring_tier),
+                to_isoformat(m.source_observed_at),
             ),
         )
 
@@ -1934,6 +1944,7 @@ class SQLiteStore:
                 confidence=?, content_json=?, source_refs_json=?,
                 expires_at=?, supersedes=?, revoked_by=?,
                 created_by_json=?, approved_by_json=?, authoring_tier=?,
+                source_observed_at=?,
                 updated_at=?
             WHERE memory_id=?
             """,
@@ -1946,6 +1957,7 @@ class SQLiteStore:
                 _to_json(m.created_by.model_dump(mode="json")) if m.created_by else None,
                 _to_json(m.approved_by.model_dump(mode="json")) if m.approved_by else None,
                 str(m.authoring_tier),
+                to_isoformat(m.source_observed_at),
                 isoformat_now(),
                 m.memory_id,
             ),
@@ -2096,6 +2108,7 @@ class SQLiteStore:
             "standing": req.standing.model_dump(mode="json") if req.standing else None,
             "premises": [p.model_dump(mode="json") for p in req.premises],
             "authoring_tier": str(memory.authoring_tier),
+            "source_observed_at": to_isoformat(memory.source_observed_at),
         }
 
     def _load_idempotent_response(
@@ -2137,10 +2150,14 @@ class SQLiteStore:
         # opens stores without initialize()). An un-migrated row has genuinely
         # unknown provenance — read it as provenance_unknown (caps at
         # retrieve_only), never as a false claim of agent authorship.
+        keys = row.keys()
         tier = (
             row["authoring_tier"]
-            if "authoring_tier" in row.keys() and row["authoring_tier"] is not None
+            if "authoring_tier" in keys and row["authoring_tier"] is not None
             else AuthoringTier.PROVENANCE_UNKNOWN
+        )
+        source_observed_at = (
+            row["source_observed_at"] if "source_observed_at" in keys else None
         )
         return MemoryObject(
             memory_id=row["memory_id"],
@@ -2159,6 +2176,7 @@ class SQLiteStore:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             expires_at=row["expires_at"],
+            source_observed_at=source_observed_at,
             supersedes=row["supersedes"],
             revoked_by=row["revoked_by"],
             created_by=ActorRef.model_validate(created_by_raw) if created_by_raw else None,

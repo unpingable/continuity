@@ -1,6 +1,6 @@
 # Gap: Continuity Time Discipline — be time-aware without hiding which clock you used
 
-**Status:** V1 implemented (commit `1d01b91`, 2026-05-27); V2 fields still proposed
+**Status:** V1 implemented (`1d01b91`); V2 `source_observed_at` implemented (2026-07-04, `tests/test_source_observed_at.py`); `last_confirmed_at` + staleness posture still deferred
 **Depends on:** existing `util/clock.py`, `MemoryPolicy.allow_rely`, `_compute_rely_state` in `sqlite.py`, the `trg_memory_objects_updated_at` SQL trigger
 **Related:** `CONTINUITY_ORIENT_HOOK.md` (read-side staleness gradient is upstream of any future "orient-only past T" posture); constellation-wide time audit (NQ / NS / Wicket / WLP / RPP / AG carry their own time-shaped gaps in their respective repos)
 **Last updated:** 2026-05-28
@@ -51,7 +51,7 @@ V1 closes the two leaks the current code carries (items 1 and 2). V2 captures th
 
 ### Deferred but named (V2)
 
-8. **`source_observed_at` is a named field on `MemoryObject` and `ObserveMemoryRequest`.** Optional. When set, it carries the time the underlying fact was observed — distinct from the memory's `created_at`. Backfill is impossible; capture begins when the field lands. V1 does not add the field; V2 does, when an audit or capture surface routinely loses the source-observation signal.
+8. **`source_observed_at` is a field on `MemoryObject` and `ObserveMemoryRequest`.** Optional. When set, it carries the time the underlying fact was observed — distinct from the memory's `created_at`. Backfill is impossible; capture begins when the field lands. **Implemented 2026-07-04** (nullable column, ALTER-migration, captured on observe, recorded in the observe receipt, carried through custody promotion, surfaced on reads/CLI/MCP; `SCHEMA_VERSION` 3→4). This is the one V2 field that is pure capture — it invents no taxonomy — so it landed while `last_confirmed_at` (needs a `confirm` producer) and the staleness posture (invariant 10) stayed deferred. Implementation pressure: named as the substrate dependency of the MapSkew candidate (`docs/candidates/MAP_SKEW.md`), which the operator asked to advance.
 
 9. **`last_confirmed_at` is bumped by explicit re-confirmation only.** A V2 event class (`confirm`) — or an event-shape under `observe` that names the prior memory it confirms — updates this column. Until V2, freshness must be inferred from the event log. The `confirm`-as-event-type-vs-sub-shape question stays open.
 

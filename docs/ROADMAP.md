@@ -95,9 +95,13 @@ ratification call, flagged here, not made here.
 Each has a spec; none has a forcing case at the front of the queue. Order here is not
 a commitment.
 
-- **Time-discipline V2** (`gaps/CONTINUITY_TIME_DISCIPLINE.md`) — `source_observed_at`,
-  `last_confirmed_at`, staleness gradient. Also the substrate blocker for the MapSkew
-  candidate (`candidates/MAP_SKEW.md`).
+- **Time-discipline V2** (`gaps/CONTINUITY_TIME_DISCIPLINE.md`) — `source_observed_at`
+  **landed 2026-07-04** (the one pure-capture field; it was MapSkew's named substrate
+  dependency). `last_confirmed_at` (needs a `confirm` producer) and the staleness
+  gradient (taxonomy — do not invent preemptively) stay deferred. MapSkew
+  (`candidates/MAP_SKEW.md`) advanced one of three triggers but does **not** graduate:
+  its observation-side owner is still unidentified, and forcing it would be the exact
+  blueshift the candidate detects — see its Graduation Assessment.
 - **Islands: declared domains and typed bridges** (`gaps/ISLAND_DISCIPLINE.md`,
   `gaps/CROSS_ISLAND_BRIDGES_GAP.md`) — manifest `purpose`/`bridge_policy`,
   `contctl domain`, receipted `bridge import`. Visibility V1

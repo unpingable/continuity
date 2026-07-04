@@ -369,6 +369,12 @@ class MemoryObject(JsonModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     expires_at: datetime | None = None
+    # When the underlying fact was OBSERVED, distinct from created_at (when this
+    # memory was RECORDED). Optional; no backfill — capture begins when a caller
+    # supplies it. A memory recorded today about a fact seen months ago carries
+    # the lag honestly instead of laundering record time as observation time.
+    # CONTINUITY_TIME_DISCIPLINE V2 invariant 8; no timestamp impersonates another.
+    source_observed_at: datetime | None = None
 
     supersedes: str | None = Field(default=None, max_length=80)
     revoked_by: str | None = Field(default=None, max_length=80)
@@ -478,6 +484,9 @@ class ObserveMemoryRequest(JsonModel):
     premises: list[PremiseRef] = Field(default_factory=list)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     expires_at: datetime | None = None
+    # Optional: when the underlying fact was observed (vs when recorded). See
+    # MemoryObject.source_observed_at / CONTINUITY_TIME_DISCIPLINE V2.
+    source_observed_at: datetime | None = None
     supersedes: str | None = Field(default=None, max_length=80)
     actor: ActorRef | None = None
     standing: StandingRef | None = None
