@@ -96,11 +96,17 @@ envelope with `declarations[]`, each carrying `ref` + `path` and a quoted
 The mismatch is bounded and known, not a defect in either repo: 2b's job was to prove
 Spine could consume a Continuity-*shaped* export with zero dependency on this package,
 and it did. Spine Slice 2c (not started) writes the real `DeclarationSource` against
-*this* schema and retires the fixture assumption. Continuity's side of that work is a
-golden conformance fixture — a deterministic sample export checked in where Spine can
-vendor it, the same way the 2b fixture was vendored (tracked in `docs/ROADMAP.md`,
-near-term slice 2). Spine additionally needs its own `build_edition` refactor
-(bytes-from-source instead of manifest-file path) — their named forcing case for 2c,
-no Continuity change implied.
+*this* schema and retires the fixture assumption. Continuity's side of that work is
+**shipped**: a golden conformance fixture at
+[`tests/fixtures/declaration_export_v0_golden.json`](../tests/fixtures/declaration_export_v0_golden.json),
+byte-locked by [`tests/test_declaration_export_golden.py`](../tests/test_declaration_export_golden.py).
+Spine vendors that file the same way it vendored its 2b fixture. The golden also freezes
+the mapping seam 2c depends on: every `ref` is `"<repo>:<path>"`, so a consumer splits
+on the first `:` to fill its own `(repo, path)` — the recovered path equals the
+declaration's `path` field. If the byte-lock test ever fails, the wire format changed:
+regenerate the golden **and** notify Spine, because a vendored copy just went stale.
+
+Spine additionally needs its own `build_edition` refactor (bytes-from-source instead of
+manifest-file path) — their named forcing case for 2c, no Continuity change implied.
 
 Retire this section when 2c lands.

@@ -1,0 +1,74 @@
+{
+  "schema": "continuity.declaration_export.v0",
+  "export_id": "sha256:7f84209224abb0da4ca666fb2107107e1718146344fca774e25a61e18b829469",
+  "exported_at": "2026-07-03T00:00:00.000000+00:00",
+  "source": {
+    "tool": "continuity",
+    "version": "0.1.0",
+    "repo": null,
+    "commit": null
+  },
+  "declarations": [
+    {
+      "ref": "agent_gov:docs/roadmaps/README.md",
+      "path": "docs/roadmaps/README.md",
+      "declared_at": "2026-06-11T16:00:00.000000+00:00",
+      "source_status": {
+        "value": "committed",
+        "standing": "quoted_continuity_status_not_spine_standing"
+      },
+      "source_metadata": {
+        "kind": "decision",
+        "reliance_class": "advisory",
+        "scope": "agent_gov",
+        "confidence": "0.8"
+      }
+    },
+    {
+      "ref": "spine:DOCTRINE.md",
+      "path": "DOCTRINE.md",
+      "declared_at": "2026-06-10T09:00:00.000000+00:00",
+      "source_status": {
+        "value": "committed",
+        "standing": "quoted_continuity_status_not_spine_standing"
+      },
+      "source_metadata": {
+        "kind": "decision",
+        "reliance_class": "advisory",
+        "scope": "spine",
+        "confidence": "0.8"
+      }
+    },
+    {
+      "ref": "spine:NAMING.md",
+      "path": "NAMING.md",
+      "declared_at": "2026-06-12T14:00:00.000000+00:00",
+      "source_status": {
+        "value": "committed",
+        "standing": "quoted_continuity_status_not_spine_standing"
+      },
+      "source_metadata": {
+        "kind": "decision",
+        "reliance_class": "advisory",
+        "scope": "spine",
+        "confidence": "0.8",
+        "supersedes": "mem_prior_naming_note0"
+      }
+    },
+    {
+      "ref": "spine:README.md",
+      "path": "README.md",
+      "declared_at": "2026-06-10T10:00:00.000000+00:00",
+      "source_status": {
+        "value": "committed",
+        "standing": "quoted_continuity_status_not_spine_standing"
+      },
+      "source_metadata": {
+        "kind": "note",
+        "reliance_class": "retrieve_only",
+        "scope": "spine",
+        "confidence": "0.8"
+      }
+    }
+  ]
+}
