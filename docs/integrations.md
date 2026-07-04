@@ -160,6 +160,10 @@ resp = store.observe_memory(req)
 
 Anything long-running, anything that needs custom integration points (e.g. a daemon that observes events and promotes selected ones), anything under test. Also the right path for building a higher-level tool on top of continuity — the CLI and MCP server are themselves library consumers.
 
+### Pinned consumer surfaces
+
+A library consumer standing on specific signatures and fields is a load-bearing surface. When one exists, the exact members it touches are recorded and locked by contract tests *in continuity's own suite*, so a breaking rename fails here before it silently breaks the consumer (which may degrade gracefully instead of raising). See [`gaps/PINNED_CONSUMER_SURFACE_GAP.md`](gaps/PINNED_CONSUMER_SURFACE_GAP.md). The first such pin is agent_gov's `src/governor/doctrine.py` (the Governor→Continuity doctrine edge), tested in [`tests/test_consumer_surface_ag.py`](../tests/test_consumer_surface_ag.py). Adding a member to a pin requires an actual consumer call site; additions to responses stay free.
+
 ## Choosing between the three
 
 - **Claude session wants to record or check?** MCP.

@@ -39,13 +39,14 @@ Spine's.
 
 ## Near-term slices, in order
 
-1. **Consumer-surface contract tests** — V1 of
+1. **Consumer-surface contract tests** — **landed 2026-07-03.** V1 of
    [`gaps/PINNED_CONSUMER_SURFACE_GAP.md`](gaps/PINNED_CONSUMER_SURFACE_GAP.md):
-   `tests/test_consumer_surface_ag.py` locking the exact surface agent_gov's
-   `doctrine.py` stands on, so a breaking refactor fails in this repo before it
-   silently kills the edge (the consumer deliberately degrades instead of failing).
-   First because it is small, and because every later slice below touches code inside
-   that surface.
+   `tests/test_consumer_surface_ag.py` locks the exact surface agent_gov's
+   `doctrine.py` stands on (five imports, six signatures, ten fields, plus the
+   consumer's `str`/`float`/`dict`/`bool` coercions), so a breaking refactor fails in
+   this repo before it silently kills the edge (the consumer deliberately degrades
+   instead of failing). First because it is small, and because every later slice below
+   touches code inside that surface.
 
 2. **Spine 2c support** — a golden `continuity.declaration_export.v0` conformance
    fixture: a deterministic sample export checked in (under `tests/fixtures/`) where

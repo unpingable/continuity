@@ -1,6 +1,6 @@
 # Gap: Pinned Consumer Surface — the API another repo already stands on
 
-**Status:** proposed
+**Status:** V1 implemented (`tests/test_consumer_surface_ag.py`); doctrine proposed
 **Depends on:** None (records existing facts; adds tests, no behavior).
 **Related:** `CROSS_COMPONENT_RELIANCE_GAP` (the doctrine layer for *what* may be relied on; this gap is about *which code shapes* a consumer relies on), `USEFUL_REFUSAL_EXPLAIN` (will change the type of `rely_reason`, which is inside the pinned surface — see invariant 4), `MEMORY_AUTHORING_TIER_GAP` (adds fields to read payloads; must stay additive against this surface). Consumer-side counterpart: `agent_gov/docs/roadmaps/tools/continuity.md` (R-CONT-1/R-CONT-2).
 **Blocks:** any refactor of `store/sqlite.py`, `util/dbpath.py`, or `api/models.py` that renames or re-signatures the pinned members below without a coordinated consumer migration.
