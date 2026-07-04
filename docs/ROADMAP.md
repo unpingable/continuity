@@ -99,9 +99,15 @@ a commitment.
   **landed 2026-07-04** (the one pure-capture field; it was MapSkew's named substrate
   dependency). `last_confirmed_at` (needs a `confirm` producer) and the staleness
   gradient (taxonomy — do not invent preemptively) stay deferred. MapSkew
-  (`candidates/MAP_SKEW.md`) advanced one of three triggers but does **not** graduate:
-  its observation-side owner is still unidentified, and forcing it would be the exact
-  blueshift the candidate detects — see its Graduation Assessment.
+  (`candidates/MAP_SKEW.md`) advanced but does **not** graduate the comparator — see
+  its Graduation Assessment.
+- **Artifact Observer V0** (`gaps/MAPSKEW_OBSERVATION_SIDE_V0.md`) — **landed
+  2026-07-04.** MapSkew's missing input surface: a read-only observer (`src/artifact_observer/`,
+  its own package, zero continuity coupling) that emits one bounded artifact-state claim.
+  Builds the light source, not the comparator — Continuity remembers, the observer
+  observes, MapSkew (later) compares. Next toward MapSkew: a second dogfood in a
+  different domain, and promoting the specimen into an identified permanent
+  observation owner — neither manufacturable on demand.
 - **Islands: declared domains and typed bridges** (`gaps/ISLAND_DISCIPLINE.md`,
   `gaps/CROSS_ISLAND_BRIDGES_GAP.md`) — manifest `purpose`/`bridge_policy`,
   `contctl domain`, receipted `bridge import`. Visibility V1

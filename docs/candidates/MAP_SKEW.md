@@ -84,14 +84,19 @@ Per `gaps/CONTINUITY_TIME_DISCIPLINE.md`'s revision discipline: graduate this ca
 Assessed against the three triggers after the operator asked to "get to the
 candidate." Honest finding: **one of three cleared; MapSkew does not graduate.**
 
-1. **Observation-side owner — STILL UNIDENTIFIED (the standing blocker).** Nothing
-   in the constellation produces artifact-state claims commensurable with memory
-   claims into continuity. The 2026-07-03 survey confirmed NQ, Standing, and
-   Linear Accountant carry no such surface, and continuity holds only `source_refs`
-   pointer metadata, not observed state. Building a repo-scanner or chartering a new
-   observation organ to unblock this would be *inventing the inputs* — the exact
-   "comparator without inputs / calculus theology in spectroscopy clothing" the
-   candidate warns against. Not done.
+1. **Observation-side owner — now has a V0 SPECIMEN, not a general solution
+   (updated 2026-07-04b).** Originally the standing blocker: nothing produced
+   artifact-state claims commensurable with memory claims. Per the 2026-07-04
+   ruling — *"build the light source, then let the map be wrong in public"* — a
+   read-only `ArtifactObserver` now exists (`src/artifact_observer/`,
+   `gaps/MAPSKEW_OBSERVATION_SIDE_V0.md`): a separate organ (zero continuity
+   coupling) that emits one bounded artifact-state claim (subject / claim_kind /
+   claim_value / observed_at / source_ref / can_testify). It observes; it does not
+   compare or judge skew. This is a **specimen** — one subject kind (file), four
+   claim kinds, one dogfood observing continuity's own repo — not a general repo
+   scanner and not the identified permanent owner. It gives MapSkew its missing
+   second input in specimen form; the general observation-side owner and surface
+   are still open.
 
 2. **Time-discipline V2 substrate — PARTIALLY CLEARED.** `source_observed_at`
    landed 2026-07-04 (it is pure capture, invents no taxonomy). But the trigger
@@ -103,15 +108,17 @@ candidate." Honest finding: **one of three cleared; MapSkew does not graduate.**
    projection-laundering instance exists. The axes taxonomy (recency / completeness
    / authority / capability / integration) remains sketched, not earned.
 
-**Why it stops here, on purpose.** Forcing MapSkew to a gap-spec or implementation
-now would ship it as more mature than reality — which is *blueshift*, the exact
-failure mode MapSkew exists to detect. Advancing it under operator enthusiasm rather
-than earned inputs would make this document the first real dogfood instance of its
-own thesis, in the wrong direction. The disciplined outcome is: bank the substrate
-win (`source_observed_at`), leave the keeper doing recognition work, and hold
-graduation until a genuine observation-side owner and a second forcing case arrive.
-The candidate stage is exactly for this: the slot is marked, the vocabulary preserved,
-the substrate now partly built — and the taxonomy stays un-invented until pressure earns it.
+**Why it stops here, on purpose.** Forcing MapSkew *itself* to a gap-spec or
+implementation now would ship it as more mature than reality — which is *blueshift*,
+the exact failure mode MapSkew exists to detect. The disciplined outcome, refined by
+the 2026-07-04 ruling: don't deadlock waiting for an abstract observation-owner
+decision *and* don't blueshift the comparator. Instead build the narrowest honest
+input surface (the `ArtifactObserver` specimen, done) and hold the *comparator*
+until it has two real sides to diff and a second forcing case has earned the axes.
+Net after 2026-07-04: substrate cleared (`source_observed_at`), observation side has a
+V0 specimen, comparator un-built, taxonomy un-invented. What still gates full
+graduation: a second dogfood in a different domain than projection-laundering, and
+promotion of the observation specimen into an identified permanent owner/surface.
 
 ## Not in scope, even at candidate stage
 
