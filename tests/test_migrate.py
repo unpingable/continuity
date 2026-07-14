@@ -132,3 +132,53 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
     # Run it again — still no-op
     result2 = store.migrate_schema()
     assert result2["changed_tables"] == []
+
+
+def test_initialize_heals_pre_authoring_tier_db(tmp_path: Path) -> None:
+    """initialize() on a DB that predates the authoring_tier column must NOT raise.
+
+    Regression for the live 2026-07-13 break: schema.sql creates
+    idx_memory_objects_scope_authoring_tier ON memory_objects(scope,
+    authoring_tier). On a pre-migration DB the CREATE TABLE IF NOT EXISTS
+    no-ops and the CREATE INDEX then raised `no such column: authoring_tier`,
+    aborting executescript before _add_missing_columns could add it — so the
+    MCP could not open the store at all. The fix adds the missing columns
+    BEFORE running the schema. This test calls initialize() DIRECTLY (the MCP
+    open path), not migrate_schema()-then-initialize() which would mask it.
+    """
+    db = tmp_path / "pre-authoring-tier.db"
+    _create_old_schema_db(db)  # memory_objects exists, WITHOUT authoring_tier
+
+    conn = sqlite3.connect(str(db))
+    cols_before = {r[1] for r in conn.execute("PRAGMA table_info(memory_objects)")}
+    conn.close()
+    assert "authoring_tier" not in cols_before  # fixture really is pre-migration
+
+    # The load-bearing assertion: this must not raise `no such column`.
+    store = SQLiteStore(db)
+    store.initialize()
+
+    conn = sqlite3.connect(str(db))
+    cols_after = {r[1] for r in conn.execute("PRAGMA table_info(memory_objects)")}
+    idx = [
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND name='idx_memory_objects_scope_authoring_tier'"
+        )
+    ]
+    # column added, index built, and old rows carry the honest default
+    # (provenance_unknown caps reliance at retrieve_only — NOT NULL, never None).
+    assert "authoring_tier" in cols_after
+    assert idx, "the post-original index must build after the heal"
+    default = conn.execute(
+        "SELECT dflt_value FROM pragma_table_info('memory_objects') "
+        "WHERE name='authoring_tier'"
+    ).fetchone()[0]
+    assert "provenance_unknown" in default
+    # a real read returns instead of raising
+    conn.execute("SELECT * FROM memory_objects LIMIT 1").fetchall()
+    conn.close()
+
+    # idempotent: opening/initializing again is a clean no-op
+    store.initialize()

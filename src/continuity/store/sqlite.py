@@ -249,6 +249,15 @@ class SQLiteStore:
         schema_path = Path(__file__).with_name("schema.sql")
         schema_sql = schema_path.read_text(encoding="utf-8")
         with self._connect() as conn:
+            # Ordering is load-bearing. schema.sql creates indexes on
+            # post-original columns (e.g. idx_memory_objects_scope_authoring_tier
+            # on memory_objects(scope, authoring_tier)). On a DB that predates
+            # that column, `CREATE TABLE IF NOT EXISTS` no-ops and the CREATE
+            # INDEX then raises `no such column: authoring_tier` — aborting the
+            # whole executescript before the columns are ever added. So add the
+            # missing columns FIRST (guarded to skip absent tables on a fresh
+            # DB), then run the schema so the index build finds the column.
+            self._add_missing_columns(conn)
             conn.executescript(schema_sql)
             self._add_missing_columns(conn)
             self._ensure_store_metadata(
@@ -262,14 +271,24 @@ class SQLiteStore:
 
         SQLite ALTER TABLE ADD COLUMN is cheap and fully supported. We
         check existence via PRAGMA table_info first to stay idempotent.
+
+        Each block is guarded on the table already existing: an empty
+        PRAGMA table_info means the table is absent (a fresh DB, before
+        schema.sql has run), and there is nothing to ALTER. This guard is
+        what lets `initialize()` call this method BEFORE `executescript`
+        (see the ordering note there): on a fresh DB every block skips and
+        the schema creates the tables complete; on a pre-existing DB the
+        columns are added here so the schema's post-original indexes
+        (e.g. idx_memory_objects_scope_authoring_tier) can be created
+        against a table that already has the column.
         """
         existing = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(store_metadata)").fetchall()
         }
-        if "scope_kind" not in existing:
+        if existing and "scope_kind" not in existing:
             conn.execute("ALTER TABLE store_metadata ADD COLUMN scope_kind TEXT NULL")
-        if "schema_version" not in existing:
+        if existing and "schema_version" not in existing:
             conn.execute(
                 "ALTER TABLE store_metadata ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
             )
@@ -278,7 +297,7 @@ class SQLiteStore:
             row["name"]
             for row in conn.execute("PRAGMA table_info(memory_links)").fetchall()
         }
-        if "pinned_content_hash" not in links_cols:
+        if links_cols and "pinned_content_hash" not in links_cols:
             conn.execute(
                 "ALTER TABLE memory_links ADD COLUMN pinned_content_hash TEXT NULL"
             )
@@ -291,14 +310,14 @@ class SQLiteStore:
             row["name"]
             for row in conn.execute("PRAGMA table_info(memory_objects)").fetchall()
         }
-        if "authoring_tier" not in obj_cols:
+        if obj_cols and "authoring_tier" not in obj_cols:
             conn.execute(
                 "ALTER TABLE memory_objects ADD COLUMN authoring_tier "
                 "TEXT NOT NULL DEFAULT 'provenance_unknown'"
             )
         # source_observed_at (CONTINUITY_TIME_DISCIPLINE V2). Nullable, no
         # backfill — pre-doctrine rows simply never carried the signal.
-        if "source_observed_at" not in obj_cols:
+        if obj_cols and "source_observed_at" not in obj_cols:
             conn.execute(
                 "ALTER TABLE memory_objects ADD COLUMN source_observed_at TEXT NULL"
             )
@@ -307,11 +326,11 @@ class SQLiteStore:
             row["name"]
             for row in conn.execute("PRAGMA table_info(memory_events)").fetchall()
         }
-        if "authoring_tier" not in evt_cols:
+        if evt_cols and "authoring_tier" not in evt_cols:
             conn.execute(
                 "ALTER TABLE memory_events ADD COLUMN authoring_tier TEXT NULL"
             )
-        if "external_witness_ref" not in evt_cols:
+        if evt_cols and "external_witness_ref" not in evt_cols:
             conn.execute(
                 "ALTER TABLE memory_events ADD COLUMN external_witness_ref TEXT NULL"
             )

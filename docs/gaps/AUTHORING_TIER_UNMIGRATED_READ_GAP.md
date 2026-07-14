@@ -1,6 +1,30 @@
 # Gap: authoring_tier query against an un-migrated store raises `no such column`
 
-**Status:** spec_slice — filed 2026-07-13, awaiting escape-count nod before build.
+> **BUILD OUTCOME (2026-07-13, DONE) — reduction falsified the spec's hypothesis.**
+> The build_slice's first task (reproduce against the real store) showed the
+> spec's central mechanism guess was WRONG. The failure was **not** a read/query
+> naming `authoring_tier` at the SQL level, and **not** a read-only-connection
+> problem. It was an **ordering bug inside `initialize()`**: `executescript(schema.sql)`
+> runs `CREATE INDEX idx_memory_objects_scope_authoring_tier ON memory_objects(scope,
+> authoring_tier)` while `CREATE TABLE IF NOT EXISTS` no-ops on the pre-existing
+> column-less table — so the index build raises `no such column` and aborts before
+> `_add_missing_columns` (next line) can add it. Confirmed by reproducing against a
+> copy of the live store (`initialize()` → `sqlite.py:252`).
+> **Fix (minimal):** call `_add_missing_columns` BEFORE `executescript` (guarded to
+> skip absent tables on a fresh DB). Columns exist → the index builds → the store
+> heals. Since the MCP opens the store via `initialize()` (writable), the live store
+> **self-heals on next MCP start** — no manual migration, no read-only issue.
+> **Hybrid-B (defensive read) proved UNNECESSARY:** the only other path (AG's
+> `doctrine.py` opening without `initialize()` and calling `latest_memory`) uses
+> `SELECT *` + the existing `Row.keys()` guard, so it never raised — already safe.
+> **Which acceptance criteria held:** no-raise ✓, correct content ✓, idempotent ✓,
+> already-migrated unchanged ✓, old rows default `provenance_unknown` (Pin E2) ✓.
+> **Mooted by the reduction:** the read-only regression + E-write hybrid (no
+> read-only path was involved). Receipts: continuity code+test commit (below);
+> AG loop `514267a`+. This is reduction-over-integration working as intended — the
+> 4-pass paper spec set the falsifiable shape; the real store killed the wrong half.
+
+**Status:** BUILT + tested 2026-07-13 (regression `test_initialize_heals_pre_authoring_tier_db`; continuity suite 289 passed, 4 pre-existing env failures unrelated). Spec history retained below as the ratification + falsification record.
 **Kind:** substrate defect (live break, not new surface).
 **Depends on:** `MEMORY_AUTHORING_TIER_GAP` (shipped the column, commit 252c11d).
 **Related:** `PINNED_CONSUMER_SURFACE_GAP` (agent_gov is the live consumer whose
